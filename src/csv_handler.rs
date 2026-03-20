@@ -70,7 +70,11 @@ pub fn read_csv(path: &Path, sep: u8) -> Result<CsvReadResult, CsvError> {
 
     let had_jagged_rows = rows.iter().any(|r| r.len() != ncols);
 
-    Ok(CsvReadResult { headers, rows, had_jagged_rows })
+    Ok(CsvReadResult {
+        headers,
+        rows,
+        had_jagged_rows,
+    })
 }
 
 pub fn write_csv(
@@ -85,7 +89,9 @@ pub fn write_csv(
     // mid-write never leaves a truncated/corrupt file at the target path.
     let tmp_path = path.with_extension("csv.tmp");
     {
-        let mut wtr = csv::WriterBuilder::new().delimiter(sep).from_path(&tmp_path)?;
+        let mut wtr = csv::WriterBuilder::new()
+            .delimiter(sep)
+            .from_path(&tmp_path)?;
 
         wtr.write_record(headers)?;
         for row in rows {

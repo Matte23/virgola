@@ -3,7 +3,7 @@ mod state;
 mod ui;
 
 use gtk4::prelude::*;
-use gtk4::{gio, Application};
+use gtk4::{Application, gio};
 
 const APP_ID: &str = "com.github.virgola";
 

@@ -1,6 +1,6 @@
 use gtk4::{
-    glib, prelude::*, Align, ApplicationWindow, Box as GtkBox, Button, Entry, Label, Orientation,
-    Window,
+    Align, ApplicationWindow, Box as GtkBox, Button, Entry, Label, Orientation, Window, glib,
+    prelude::*,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -74,7 +74,7 @@ pub fn show_custom_separator_dialog<F: FnOnce(Option<u8>) + 'static>(
 
             // Only ASCII printable characters are valid CSV delimiters.
             let byte = bytes[0];
-            if byte >= 128 || byte < 32 || byte == 127 {
+            if !(32..128).contains(&byte) || byte == 127 {
                 entry_ok.add_css_class("error");
                 return;
             }

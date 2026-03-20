@@ -18,25 +18,15 @@ pub enum Direction {
 /// `query` stores the *lowercased* version of the user's input — matching is
 /// always case-insensitive and the lowercase form is kept to avoid re-lowering
 /// on every cell comparison.
+#[derive(Default)]
 pub struct SearchState {
     pub query: String,
     // TODO: the HashSet and the Vec are redundant copies of the same data and
     //       must be kept manually in sync.  Consider a single `IndexSet`
     //       (indexmap crate) that provides both O(1) lookup and stable order.
-    pub matches: HashSet<(usize, usize)>,     // O(1) lookup for highlighting
+    pub matches: HashSet<(usize, usize)>, // O(1) lookup for highlighting
     pub matches_ordered: Vec<(usize, usize)>, // ordered for navigation
-    pub current_match: Option<usize>,         // index into matches_ordered
-}
-
-impl Default for SearchState {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            matches: HashSet::new(),
-            matches_ordered: Vec::new(),
-            current_match: None,
-        }
-    }
+    pub current_match: Option<usize>,     // index into matches_ordered
 }
 
 impl SearchState {
@@ -100,8 +90,11 @@ impl State {
             }
         }
 
-        self.search.current_match =
-            if self.search.matches_ordered.is_empty() { None } else { Some(0) };
+        self.search.current_match = if self.search.matches_ordered.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
         self.search.matches_ordered.first().map(|&(r, _)| r)
     }
 

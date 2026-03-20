@@ -6,15 +6,15 @@ use crate::csv_handler;
 use crate::state::{Direction, State};
 use dialogs::show_custom_separator_dialog;
 use gtk4::{
-    gio, glib, prelude::*, AboutDialog, AlertDialog, Align, ApplicationWindow, Box as GtkBox,
-    Button, CssProvider, EventControllerKey, FileDialog, License, Orientation, SearchBar,
-    SearchEntry,
+    AboutDialog, AlertDialog, Align, ApplicationWindow, Box as GtkBox, Button, CssProvider,
+    EventControllerKey, FileDialog, License, Orientation, SearchBar, SearchEntry, gio, glib,
+    prelude::*,
 };
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use table::Table;
-use toolbar::{Toolbar, CUSTOM_SEP_IDX};
+use toolbar::{CUSTOM_SEP_IDX, Toolbar};
 
 // TODO: `build_ui` has grown into a large setup function (~300 lines).  Break
 //       each "── … ──" block into a separate named function or module so each
@@ -108,15 +108,20 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
                     let save_btn_cb = toolbar_rc.save_btn.clone();
                     let dialog = make_open_dialog();
                     dialog.open(Some(&window_ref), gio::Cancellable::NONE, move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                let sep = toolbar_rc
-                                    .current_separator()
-                                    .unwrap_or_else(|| state2.borrow().separator);
-                                load_csv_into_state(
-                                    path, sep, &state2, &table2, &window_cb, &save_btn_cb,
-                                );
-                            }
+                        if let Ok(file) = result
+                            && let Some(path) = file.path()
+                        {
+                            let sep = toolbar_rc
+                                .current_separator()
+                                .unwrap_or_else(|| state2.borrow().separator);
+                            load_csv_into_state(
+                                path,
+                                sep,
+                                &state2,
+                                &table2,
+                                &window_cb,
+                                &save_btn_cb,
+                            );
                         }
                     });
                 }
@@ -159,31 +164,26 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
                 let current_path = state_c.borrow().path.clone();
                 let dialog = make_save_dialog(current_path.as_deref());
                 dialog.save(Some(&window_ref), gio::Cancellable::NONE, move |result| {
-                    if let Ok(file) = result {
-                        if let Some(path) = file.path() {
-                            let st = state_c.borrow();
-                            match csv_handler::write_csv(
-                                &path,
-                                st.separator,
-                                &st.headers,
-                                &st.rows,
-                            ) {
-                                Err(e) => {
-                                    drop(st);
-                                    show_message_dialog(
-                                        &window_c,
-                                        "Could not save file",
-                                        &e.to_string(),
-                                    );
-                                }
-                                Ok(()) => {
-                                    drop(st);
-                                    let mut st = state_c.borrow_mut();
-                                    st.dirty = false;
-                                    st.path = Some(path.clone());
-                                    update_title(&window_c, Some(&path), false);
-                                    btn_c.set_sensitive(false);
-                                }
+                    if let Ok(file) = result
+                        && let Some(path) = file.path()
+                    {
+                        let st = state_c.borrow();
+                        match csv_handler::write_csv(&path, st.separator, &st.headers, &st.rows) {
+                            Err(e) => {
+                                drop(st);
+                                show_message_dialog(
+                                    &window_c,
+                                    "Could not save file",
+                                    &e.to_string(),
+                                );
+                            }
+                            Ok(()) => {
+                                drop(st);
+                                let mut st = state_c.borrow_mut();
+                                st.dirty = false;
+                                st.path = Some(path.clone());
+                                update_title(&window_c, Some(&path), false);
+                                btn_c.set_sensitive(false);
                             }
                         }
                     }
@@ -230,9 +230,7 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
                 match toolbar_rc.current_separator() {
                     Some(sep) => {
                         prev_idx.set(dd.selected());
-                        apply_separator(
-                            &state, &table, &window_ref, &toolbar_rc.save_btn, sep,
-                        );
+                        apply_separator(&state, &table, &window_ref, &toolbar_rc.save_btn, sep);
                     }
                     None => {
                         let state_c = Rc::clone(&state);
@@ -250,7 +248,11 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
                                 Some(sep) => {
                                     prev_idx_c.set(CUSTOM_SEP_IDX);
                                     apply_separator(
-                                        &state_c, &table_c, &window_c, &save_btn_c, sep,
+                                        &state_c,
+                                        &table_c,
+                                        &window_c,
+                                        &save_btn_c,
+                                        sep,
                                     );
                                 }
                                 None => {
@@ -284,8 +286,7 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
         let search_entry_c = search_entry.clone();
         let ctrl = EventControllerKey::new();
         ctrl.connect_key_pressed(move |_, key, _, modifiers| {
-            if key == gtk4::gdk::Key::f
-                && modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+            if key == gtk4::gdk::Key::f && modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
             {
                 open_search_bar(&search_bar_c, &search_entry_c);
                 return glib::Propagation::Stop;
@@ -518,7 +519,10 @@ fn make_file_dialog(title: &str, filters: &[(&str, &[&str])]) -> FileDialog {
 fn make_open_dialog() -> FileDialog {
     make_file_dialog(
         "Open CSV",
-        &[("CSV / TSV files", &["*.csv", "*.tsv"]), ("All files", &["*"])],
+        &[
+            ("CSV / TSV files", &["*.csv", "*.tsv"]),
+            ("All files", &["*"]),
+        ],
     )
 }
 

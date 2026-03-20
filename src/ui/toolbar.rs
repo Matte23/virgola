@@ -1,6 +1,6 @@
 use gtk4::{
-    prelude::*, Align, Box as GtkBox, Button, DropDown, HeaderBar, Label, MenuButton,
-    Orientation, Popover, Separator, ToggleButton,
+    Align, Box as GtkBox, Button, DropDown, HeaderBar, Label, MenuButton, Orientation, Popover,
+    Separator, ToggleButton, prelude::*,
 };
 
 /// Single source of truth for the separator dropdown.
@@ -95,7 +95,15 @@ impl Toolbar {
         header_bar.pack_end(&menu_btn);
         header_bar.pack_end(&search_btn);
 
-        Self { header_bar, open_btn, save_btn, sep_dropdown, about_btn, menu_popover, search_btn }
+        Self {
+            header_bar,
+            open_btn,
+            save_btn,
+            sep_dropdown,
+            about_btn,
+            menu_popover,
+            search_btn,
+        }
     }
 
     /// Returns `Some(byte)` for preset separators, `None` for "Custom…".

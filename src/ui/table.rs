@@ -1,8 +1,8 @@
 use crate::state::State;
 use glib::BoxedAnyObject;
 use gtk4::{
-    gio, glib, prelude::*, Box as GtkBox, ColumnView, ColumnViewColumn, EditableLabel, ListItem,
-    NoSelection, Orientation, ScrolledWindow, SignalListItemFactory,
+    Box as GtkBox, ColumnView, ColumnViewColumn, EditableLabel, ListItem, NoSelection, Orientation,
+    ScrolledWindow, SignalListItemFactory, gio, glib, prelude::*,
 };
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -58,8 +58,7 @@ impl Table {
         if let Some(store) = self.current_store.borrow().as_ref() {
             let n = store.n_items();
             if n > 0 {
-                let items: Vec<glib::Object> =
-                    (0..n).filter_map(|i| store.item(i)).collect();
+                let items: Vec<glib::Object> = (0..n).filter_map(|i| store.item(i)).collect();
                 store.splice(0, n, &items);
             }
         }
@@ -117,8 +116,8 @@ impl Table {
         // plus the first 50 data rows, multiply max char count by an approximate
         // pixel width, and clamp to a sensible range.
         const SAMPLE_ROWS: usize = 50;
-        const CHAR_PX: i32 = 8;  // rough average for the default GTK4 font
-        const PAD_PX: i32 = 16;  // cell padding
+        const CHAR_PX: i32 = 8; // rough average for the default GTK4 font
+        const PAD_PX: i32 = 16; // cell padding
         const MIN_PX: i32 = 60;
         const MAX_PX: i32 = 300;
         let col_widths: Vec<i32> = (0..ncols)
@@ -213,7 +212,8 @@ impl Table {
                     {
                         let st = state.borrow();
                         let is_current = st
-                            .search.current_match
+                            .search
+                            .current_match
                             .and_then(|i| st.search.matches_ordered.get(i))
                             .is_some_and(|&m| m == (pos, col_idx));
                         let is_match = st.search.matches.contains(&(pos, col_idx));
