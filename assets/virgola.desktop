@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Virgola
+Comment=View and edit CSV files
+Exec=virgola %f
+Terminal=false
+Type=Application
+Categories=Office;Utility;
+MimeType=text/csv;text/plain;
+Keywords=csv;spreadsheet;table;
