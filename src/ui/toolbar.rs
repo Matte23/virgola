@@ -112,4 +112,13 @@ impl Toolbar {
             .get(self.sep_dropdown.selected() as usize)
             .and_then(|&(_, byte)| byte)
     }
+
+    /// Returns the dropdown index for a known separator byte, or `None` if the
+    /// byte is not in the preset list (would need "Custom…").
+    pub fn index_of_separator(sep: u8) -> Option<u32> {
+        SEPARATORS
+            .iter()
+            .position(|&(_, byte)| byte == Some(sep))
+            .map(|i| i as u32)
+    }
 }

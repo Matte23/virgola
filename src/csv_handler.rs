@@ -77,6 +77,64 @@ pub fn read_csv(path: &Path, sep: u8) -> Result<CsvReadResult, CsvError> {
     })
 }
 
+/// Sniff the separator used in a CSV file by sampling the first few lines.
+///
+/// Scores each candidate byte (`,` `;` `\t` `|`) by how many times it appears
+/// across the sampled lines and whether its per-line count is consistent.
+/// Returns the best-scoring candidate, falling back to `,` on any error or
+/// when no candidate scores above zero.
+pub fn detect_separator(path: &Path) -> u8 {
+    const CANDIDATES: &[u8] = &[b',', b';', b'\t', b'|'];
+    const MAX_LINES: usize = 20;
+    const SAMPLE_BYTES: usize = 8192;
+
+    let content = match fs::read(path) {
+        Ok(c) => c,
+        Err(_) => return b',',
+    };
+    let sample = &content[..content.len().min(SAMPLE_BYTES)];
+    let text = String::from_utf8_lossy(sample);
+
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(MAX_LINES)
+        .collect();
+
+    if lines.is_empty() {
+        return b',';
+    }
+
+    let mut best_sep = b',';
+    let mut best_score: usize = 0;
+
+    for &sep in CANDIDATES {
+        let counts: Vec<usize> = lines
+            .iter()
+            .map(|line| line.bytes().filter(|&b| b == sep).count())
+            .collect();
+
+        let total: usize = counts.iter().sum();
+        if total == 0 {
+            continue;
+        }
+
+        // Reward consistency: if every sampled line has the same count, the
+        // separator is almost certainly structural rather than incidental.
+        let min = *counts.iter().min().unwrap();
+        let max = *counts.iter().max().unwrap();
+        let consistency_bonus = if min == max { 2 } else { 1 };
+        let score = total * consistency_bonus;
+
+        if score > best_score {
+            best_score = score;
+            best_sep = sep;
+        }
+    }
+
+    best_sep
+}
+
 pub fn write_csv(
     path: &Path,
     sep: u8,

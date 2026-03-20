@@ -88,6 +88,11 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
         }));
     }
 
+    // Shared state for silently syncing the separator dropdown (used by both
+    // the open button and the separator dropdown handlers below).
+    let sep_prev_idx: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+    let sep_reverting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
     // ── Open button ───────────────────────────────────────────────────────────
     {
         let state = Rc::clone(&state);
@@ -95,25 +100,37 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
         let toolbar_rc = Rc::clone(&toolbar);
         let window_ref = window.clone();
         let open_btn = toolbar.open_btn.clone();
+        let sep_prev_idx_open = Rc::clone(&sep_prev_idx);
+        let sep_reverting_open = Rc::clone(&sep_reverting);
         open_btn.connect_clicked(move |_| {
             let do_open = {
                 let state = Rc::clone(&state);
                 let table = Rc::clone(&table);
                 let toolbar_rc = Rc::clone(&toolbar_rc);
                 let window_ref = window_ref.clone();
+                let sep_prev_idx = Rc::clone(&sep_prev_idx_open);
+                let sep_reverting = Rc::clone(&sep_reverting_open);
                 move || {
                     let state2 = Rc::clone(&state);
                     let table2 = Rc::clone(&table);
                     let window_cb = window_ref.clone();
                     let save_btn_cb = toolbar_rc.save_btn.clone();
+                    let sep_prev_idx = Rc::clone(&sep_prev_idx);
+                    let sep_reverting = Rc::clone(&sep_reverting);
                     let dialog = make_open_dialog();
                     dialog.open(Some(&window_ref), gio::Cancellable::NONE, move |result| {
                         if let Ok(file) = result
                             && let Some(path) = file.path()
                         {
-                            let sep = toolbar_rc
-                                .current_separator()
-                                .unwrap_or_else(|| state2.borrow().separator);
+                            let sep = csv_handler::detect_separator(&path);
+                            // Silently update the dropdown to match the
+                            // detected separator so the UI stays in sync.
+                            if let Some(idx) = Toolbar::index_of_separator(sep) {
+                                sep_reverting.set(true);
+                                toolbar_rc.sep_dropdown.set_selected(idx);
+                                sep_reverting.set(false);
+                                sep_prev_idx.set(idx);
+                            }
                             load_csv_into_state(
                                 path,
                                 sep,
@@ -217,12 +234,10 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
         let toolbar_rc = Rc::clone(&toolbar);
         let window_ref = window.clone();
         let popover = toolbar.menu_popover.clone();
-        let prev_idx: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-        let reverting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let sep_dropdown = toolbar.sep_dropdown.clone();
         sep_dropdown.connect_selected_notify({
-            let prev_idx = prev_idx.clone();
-            let reverting = reverting.clone();
+            let prev_idx = sep_prev_idx.clone();
+            let reverting = sep_reverting.clone();
             move |dd| {
                 if reverting.get() {
                     return;
@@ -364,7 +379,13 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
     // from the file manager).  The window is presented after this block so any
     // error dialog already has a valid parent.
     if let Some(path) = initial_path {
-        let sep = state.borrow().separator;
+        let sep = csv_handler::detect_separator(&path);
+        if let Some(idx) = Toolbar::index_of_separator(sep) {
+            sep_reverting.set(true);
+            toolbar.sep_dropdown.set_selected(idx);
+            sep_reverting.set(false);
+            sep_prev_idx.set(idx);
+        }
         load_csv_into_state(path, sep, &state, &table, &window, &toolbar.save_btn);
     }
 
@@ -399,7 +420,8 @@ fn apply_separator(
         move || {
             // Always store the chosen separator (also used for future opens).
             state.borrow_mut().separator = sep;
-            if let Some(path) = state.borrow().path.clone() {
+            let path = state.borrow().path.clone();
+            if let Some(path) = path {
                 load_csv_into_state(path, sep, &state, &table, &window, &save_btn);
             }
         }
