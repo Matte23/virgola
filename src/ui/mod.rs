@@ -217,9 +217,10 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
             popover.popdown();
             let about = AboutDialog::builder()
                 .program_name("Virgola")
+                .authors(["Matte23"])
                 .version(env!("CARGO_PKG_VERSION"))
                 .comments("A simple CSV viewer and editor")
-                .license_type(License::MitX11)
+                .license_type(License::Gpl30)
                 .transient_for(&window_ref)
                 .modal(true)
                 .build();

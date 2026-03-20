@@ -15,7 +15,6 @@ fn main() {
         .application_id(APP_ID)
         // HANDLES_OPEN allows files to be passed on the command line and via
         // "Open With" from the desktop environment (%f in the .desktop file).
-        // Without this flag GLib rejects file arguments at startup.
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
 

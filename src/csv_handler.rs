@@ -84,7 +84,7 @@ pub fn read_csv(path: &Path, sep: u8) -> Result<CsvReadResult, CsvError> {
 /// Returns the best-scoring candidate, falling back to `,` on any error or
 /// when no candidate scores above zero.
 pub fn detect_separator(path: &Path) -> u8 {
-    const CANDIDATES: &[u8] = &[b',', b';', b'\t', b'|'];
+    const CANDIDATES: &[u8] = b",;\t|";
     const MAX_LINES: usize = 20;
     const SAMPLE_BYTES: usize = 8192;
 
