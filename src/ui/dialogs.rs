@@ -1,7 +1,5 @@
-use gtk4::{
-    Align, ApplicationWindow, Box as GtkBox, Button, Entry, Label, Orientation, Window, glib,
-    prelude::*,
-};
+use adw::{ApplicationWindow, Dialog, prelude::*};
+use gtk::{Align, Box as GtkBox, Button, Entry, Label, Orientation};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -11,12 +9,9 @@ pub fn show_custom_separator_dialog<F: FnOnce(Option<u8>) + 'static>(
     parent: &ApplicationWindow,
     on_result: F,
 ) {
-    let dialog = Window::builder()
+    let dialog = Dialog::builder()
         .title("Custom Separator")
-        .transient_for(parent)
-        .modal(true)
-        .default_width(280)
-        .resizable(false)
+        .content_width(280)
         .build();
 
     let vbox = GtkBox::new(Orientation::Vertical, 8);
@@ -107,13 +102,13 @@ pub fn show_custom_separator_dialog<F: FnOnce(Option<u8>) + 'static>(
         dlg.close();
     });
 
-    let cb = callback.clone();
-    dialog.connect_close_request(move |_| {
-        if let Some(f) = cb.borrow_mut().take() {
+    // Fire None callback if the dialog is closed by any other means (e.g. Escape).
+    // `take()` is a no-op if OK or Cancel already consumed the callback.
+    dialog.connect_closed(move |_| {
+        if let Some(f) = callback.borrow_mut().take() {
             f(None);
         }
-        glib::Propagation::Proceed
     });
 
-    dialog.present();
+    dialog.present(Some(parent));
 }

@@ -1,6 +1,7 @@
-use gtk4::{
-    Align, Box as GtkBox, Button, DropDown, HeaderBar, Label, MenuButton, Orientation, Popover,
-    Separator, ToggleButton, prelude::*,
+use adw::HeaderBar;
+use gtk::{
+    Align, Box as GtkBox, Button, DropDown, Label, MenuButton, Orientation, Popover, Separator,
+    ToggleButton, prelude::*,
 };
 
 /// Single source of truth for the separator dropdown.

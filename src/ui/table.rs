@@ -1,6 +1,6 @@
 use crate::state::State;
 use glib::BoxedAnyObject;
-use gtk4::{
+use gtk::{
     Box as GtkBox, ColumnView, ColumnViewColumn, EditableLabel, ListItem, NoSelection, Orientation,
     ScrolledWindow, SignalListItemFactory, gio, glib, prelude::*,
 };
@@ -29,8 +29,8 @@ impl Table {
         column_view.set_show_row_separators(true);
 
         let scrolled = ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Automatic)
-            .vscrollbar_policy(gtk4::PolicyType::Automatic)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
             .hexpand(true)
             .child(&column_view)
@@ -72,7 +72,7 @@ impl Table {
     pub fn scroll_to_match(&self, row: usize) {
         let cv = self.column_view.clone();
         glib::idle_add_local_once(move || {
-            cv.scroll_to(row as u32, None, gtk4::ListScrollFlags::FOCUS, None);
+            cv.scroll_to(row as u32, None, gtk::ListScrollFlags::FOCUS, None);
         });
     }
 

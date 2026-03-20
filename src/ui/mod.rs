@@ -4,11 +4,14 @@ pub mod toolbar;
 
 use crate::csv_handler;
 use crate::state::{Direction, State};
-use dialogs::show_custom_separator_dialog;
-use gtk4::{
-    AboutDialog, AlertDialog, Align, ApplicationWindow, Box as GtkBox, Button, CssProvider,
-    EventControllerKey, FileDialog, License, Orientation, SearchBar, SearchEntry, gio, glib,
+use adw::{
+    AboutDialog, AlertDialog, ApplicationWindow, ResponseAppearance, ToolbarView, gio, glib,
     prelude::*,
+};
+use dialogs::show_custom_separator_dialog;
+use gtk::{
+    Align, Box as GtkBox, Button, CssProvider, EventControllerKey, FileDialog, License,
+    Orientation, SearchBar, SearchEntry,
 };
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -21,7 +24,7 @@ use toolbar::{CUSTOM_SEP_IDX, Toolbar};
 //       concern (search bar, file actions, separator logic) can be read and
 //       tested independently.
 
-pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf>) {
+pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>) {
     // ── CSS for search highlighting ───────────────────────────────────────────
     // TODO: move CSS into a GResource file (style.css) instead of an inline
     //       string.  That also makes it easy to support a dark-mode variant.
@@ -30,10 +33,10 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
         ".search-match { background-color: rgba(255, 220, 0, 0.55); }
          .search-match-current { background-color: rgba(255, 140, 0, 0.75); }",
     );
-    gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().expect("no default display"),
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().expect("no default display"),
         &css,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
     let window = ApplicationWindow::builder()
@@ -70,11 +73,13 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
     search_bar.set_child(Some(&search_box));
     search_bar.connect_entry(&search_entry);
 
+    let toolbar_view = ToolbarView::new();
+    toolbar_view.add_top_bar(&toolbar.header_bar);
     let vbox = GtkBox::new(Orientation::Vertical, 0);
-    window.set_titlebar(Some(&toolbar.header_bar));
     vbox.append(&search_bar);
     vbox.append(&table.scrolled);
-    window.set_child(Some(&vbox));
+    toolbar_view.set_content(Some(&vbox));
+    window.set_content(Some(&toolbar_view));
 
     // ── on_dirty: update title and re-enable save when a cell is edited ───────
     {
@@ -216,15 +221,13 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
         toolbar.about_btn.connect_clicked(move |_| {
             popover.popdown();
             let about = AboutDialog::builder()
-                .program_name("Virgola")
-                .authors(["Matte23"])
+                .application_name("Virgola")
+                .developer_name("Matte23")
                 .version(env!("CARGO_PKG_VERSION"))
                 .comments("A simple CSV viewer and editor")
                 .license_type(License::Gpl30)
-                .transient_for(&window_ref)
-                .modal(true)
                 .build();
-            about.present();
+            about.present(Some(&window_ref));
         });
     }
 
@@ -302,8 +305,7 @@ pub fn build_ui(app: &gtk4::Application, initial_path: Option<std::path::PathBuf
         let search_entry_c = search_entry.clone();
         let ctrl = EventControllerKey::new();
         ctrl.connect_key_pressed(move |_, key, _, modifiers| {
-            if key == gtk4::gdk::Key::f && modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
-            {
+            if key == gtk::gdk::Key::f && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                 open_search_bar(&search_bar_c, &search_entry_c);
                 return glib::Propagation::Stop;
             }
@@ -488,11 +490,11 @@ fn open_search_bar(bar: &SearchBar, entry: &SearchEntry) {
 /// Show a modal informational/error dialog with a bold title and a detail line.
 fn show_message_dialog(window: &ApplicationWindow, title: &str, detail: &str) {
     let dialog = AlertDialog::builder()
-        .message(title)
-        .detail(detail)
-        .modal(true)
+        .heading(title)
+        .body(detail)
         .build();
-    dialog.show(Some(window));
+    dialog.add_response("ok", "OK");
+    dialog.present(Some(window));
 }
 
 /// Update the window title to reflect the open file and dirty state.
@@ -510,15 +512,16 @@ fn update_title(window: &ApplicationWindow, path: Option<&Path>, dirty: bool) {
 /// the user chooses to discard.
 fn confirm_discard<F: FnOnce() + 'static>(window: &ApplicationWindow, on_confirmed: F) {
     let dialog = AlertDialog::builder()
-        .message("Unsaved Changes")
-        .detail("You have unsaved changes. Discard them and continue?")
-        .modal(true)
+        .heading("Unsaved Changes")
+        .body("You have unsaved changes. Discard them and continue?")
         .build();
-    dialog.set_buttons(&["Cancel", "Discard"]);
-    dialog.set_cancel_button(0);
-    dialog.set_default_button(0);
-    dialog.choose(Some(window), gio::Cancellable::NONE, move |result| {
-        if result == Ok(1) {
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("discard", "Discard");
+    dialog.set_response_appearance("discard", ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.choose(Some(window), gio::Cancellable::NONE, move |response| {
+        if response == "discard" {
             on_confirmed();
         }
     });
@@ -526,9 +529,9 @@ fn confirm_discard<F: FnOnce() + 'static>(window: &ApplicationWindow, on_confirm
 
 fn make_file_dialog(title: &str, filters: &[(&str, &[&str])]) -> FileDialog {
     let dialog = FileDialog::builder().title(title).build();
-    let filter_store = gio::ListStore::new::<gtk4::FileFilter>();
+    let filter_store = gio::ListStore::new::<gtk::FileFilter>();
     for &(name, patterns) in filters {
-        let f = gtk4::FileFilter::new();
+        let f = gtk::FileFilter::new();
         f.set_name(Some(name));
         for pattern in patterns {
             f.add_pattern(pattern);

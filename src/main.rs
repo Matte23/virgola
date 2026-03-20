@@ -2,8 +2,8 @@ mod csv_handler;
 mod state;
 mod ui;
 
-use gtk4::prelude::*;
-use gtk4::{Application, gio};
+use adw::prelude::*;
+use adw::{Application, gio};
 
 const APP_ID: &str = "com.github.virgola";
 
