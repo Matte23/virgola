@@ -12,7 +12,7 @@ fn apply_highlight(cell_box: &GtkBox, row: usize, col: usize, state: &State) {
     let is_current = state
         .search
         .current_match
-        .and_then(|i| state.search.matches_ordered.get(i))
+        .and_then(|i| state.search.matches.get_index(i))
         .is_some_and(|&m| m == (row, col));
     let is_match = state.search.matches.contains(&(row, col));
 

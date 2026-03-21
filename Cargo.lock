@@ -11,6 +11,7 @@ dependencies = [
  "glib 0.21.5",
  "glib-build-tools",
  "gtk4",
+ "indexmap",
  "libadwaita",
 ]
 
