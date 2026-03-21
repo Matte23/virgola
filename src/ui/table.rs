@@ -4,7 +4,7 @@ use gtk::{
     Box as GtkBox, ColumnView, ColumnViewColumn, EditableLabel, ListItem, NoSelection, Orientation,
     ScrolledWindow, SignalListItemFactory, gio, glib, prelude::*,
 };
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -95,11 +95,11 @@ impl Table {
     }
 
     pub fn load(&self, state: Rc<RefCell<State>>) {
-        // TODO: `load()` tears down and rebuilds ALL columns every time it is
-        //       called, even when only cell values changed (e.g. after a save).
-        //       Separate "set schema" (add/remove columns) from "set data"
-        //       (replace the ListStore items) so only the necessary part is
-        //       rebuilt.
+        // `load()` tears down and rebuilds all columns and the ListStore.
+        // This is intentional: all callers (open file, separator change) supply
+        // a new schema, so a full rebuild is always correct.  Cell values are
+        // NOT stored in the ListStore — bind closures read from `state.rows`
+        // directly, so no partial-refresh path is needed.
 
         // Remove existing columns
         let cols: Vec<ColumnViewColumn> = (0..self.column_view.columns().n_items())
@@ -123,8 +123,8 @@ impl Table {
         }
 
         let store = gio::ListStore::new::<BoxedAnyObject>();
-        for row in &st.rows {
-            store.append(&BoxedAnyObject::new(row.clone()));
+        for _ in &st.rows {
+            store.append(&BoxedAnyObject::new(()));
         }
 
         let headers = st.headers.clone();
@@ -191,7 +191,6 @@ impl Table {
 
             factory.connect_bind({
                 let state = Rc::clone(&state);
-                let store = store.clone();
                 let handler_map = handler_map.clone();
                 let on_dirty_cb = on_dirty_cb.clone();
                 let cell_registry = Rc::clone(&self.cell_registry);
@@ -218,14 +217,19 @@ impl Table {
                     // connecting the handler only AFTER the text is set, the
                     // programmatic write is invisible to our handler — no need
                     // for an in_bind guard flag.
+                    //
+                    // `state.rows` is the single source of truth; the ListStore
+                    // holds only dummy placeholder items (one per row) for
+                    // virtual-scroll bookkeeping.
                     {
-                        let item = list_item
-                            .item()
-                            .expect("list item has no model item")
-                            .downcast::<BoxedAnyObject>()
-                            .expect("model item should be BoxedAnyObject");
-                        let row: Ref<Vec<String>> = item.borrow();
-                        label.set_text(row.get(col_idx).map(String::as_str).unwrap_or(""));
+                        let st = state.borrow();
+                        let text = st
+                            .rows
+                            .get(pos)
+                            .and_then(|r| r.get(col_idx))
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        label.set_text(text);
                     }
 
                     // ── 2. Apply search highlighting & register widget ────────
@@ -238,14 +242,7 @@ impl Table {
                         .insert((pos, col_idx), cell_box.clone());
 
                     // ── 3. Connect edit handler (after set_text — safe) ───────
-                    //
-                    // TODO: data is written to two places: `state.rows` (master)
-                    //       AND the `BoxedAnyObject` inside the ListStore (a
-                    //       clone made at load time).  These can drift.  The
-                    //       ListStore item should be the single source of truth,
-                    //       with `state.rows` rebuilt on save, or vice-versa.
                     let state_c = Rc::clone(&state);
-                    let store_c = store.clone();
                     let on_dirty_c = on_dirty_cb.clone();
                     let handler_id = label.connect_changed(move |lbl| {
                         let new_val = lbl.text().to_string();
@@ -255,22 +252,12 @@ impl Table {
                                 while row.len() <= col_idx {
                                     row.push(String::new());
                                 }
-                                row[col_idx] = new_val.clone();
+                                row[col_idx] = new_val;
                                 st.dirty = true;
                             }
                         }
                         if let Some(f) = &on_dirty_c {
                             f();
-                        }
-                        if let Some(obj) = store_c
-                            .item(pos as u32)
-                            .and_then(|o| o.downcast::<BoxedAnyObject>().ok())
-                        {
-                            let mut row: RefMut<Vec<String>> = obj.borrow_mut();
-                            while row.len() <= col_idx {
-                                row.push(String::new());
-                            }
-                            row[col_idx] = new_val;
                         }
                     });
 
