@@ -19,13 +19,14 @@ fn main() {
         .build();
 
     // No file argument — just open the window.
-    app.connect_activate(|app| ui::build_ui(app, None));
+    app.connect_activate(|app| ui::build_ui(app, None, 0));
 
     // One or more files from the CLI or desktop environment.
-    // We only handle the first file; the rest are silently ignored for now.
+    // Only the first file is opened; surplus files are reported to the user.
     app.connect_open(|app, files, _hint| {
         let path = files.first().and_then(|f| f.path());
-        ui::build_ui(app, path);
+        let extra = files.len().saturating_sub(1);
+        ui::build_ui(app, path, extra);
     });
 
     app.run();

@@ -94,17 +94,21 @@ impl Toolbar {
         about_btn.set_has_frame(false);
 
         // ── Popover ───────────────────────────────────────────────────────
-        // TODO: the popover mixes unrelated concerns: settings rows
-        //       (separator, encoding) and an app-info action (About).  As the
-        //       menu grows, these should be in separate sections or menus.
+        // Two sections: "Settings" (separator + encoding) and a separator
+        // line before the "About" action so the two concerns are distinct.
+        let settings_label = Label::new(Some("Settings"));
+        settings_label.set_halign(Align::Start);
+        settings_label.add_css_class("heading");
+        settings_label.set_margin_top(4);
+        settings_label.set_margin_bottom(2);
+
         let popover_box = GtkBox::new(Orientation::Vertical, 4);
         popover_box.set_margin_top(8);
         popover_box.set_margin_bottom(8);
         popover_box.set_margin_start(8);
         popover_box.set_margin_end(8);
-        // TODO: magic number 220 — derive width from content or use a CSS
-        //       min-width rule.
-        popover_box.set_width_request(220);
+        popover_box.add_css_class("virgola-menu");
+        popover_box.append(&settings_label);
         popover_box.append(&sep_row);
         popover_box.append(&enc_row);
         popover_box.append(&Separator::new(Orientation::Horizontal));

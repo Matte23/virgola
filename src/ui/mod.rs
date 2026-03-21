@@ -10,8 +10,8 @@ use adw::{
 };
 use dialogs::show_custom_separator_dialog;
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, DropDown, EventControllerKey, FileDialog, License,
-    Orientation, Popover, SearchBar, SearchEntry, ToggleButton,
+    Align, Box as GtkBox, Button, CssProvider, EventControllerKey, FileDialog, License,
+    Orientation, SearchBar, SearchEntry,
 };
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,40 @@ use std::rc::Rc;
 use table::Table;
 use toolbar::{CUSTOM_SEP_IDX, Toolbar};
 
-pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>) {
+// ── Shared UI context ─────────────────────────────────────────────────────────
+
+/// Bundles every `Rc`-wrapped handle that signal handlers share.
+///
+/// All fields are cheap to clone (GTK objects use GObject reference counting;
+/// `Rc<_>` increments a counter).  Passing one `ctx.clone()` into each
+/// closure replaces 5–7 individual `Rc::clone` calls at each call site.
+struct UiContext {
+    state: Rc<RefCell<State>>,
+    table: Rc<Table>,
+    toolbar: Rc<Toolbar>,
+    window: ApplicationWindow,
+    sep_prev_idx: Rc<Cell<u32>>,
+    sep_reverting: Rc<Cell<bool>>,
+    enc_reverting: Rc<Cell<bool>>,
+}
+
+impl Clone for UiContext {
+    fn clone(&self) -> Self {
+        Self {
+            state: Rc::clone(&self.state),
+            table: Rc::clone(&self.table),
+            toolbar: Rc::clone(&self.toolbar),
+            window: self.window.clone(),
+            sep_prev_idx: Rc::clone(&self.sep_prev_idx),
+            sep_reverting: Rc::clone(&self.sep_reverting),
+            enc_reverting: Rc::clone(&self.enc_reverting),
+        }
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_files: usize) {
     // ── CSS for search highlighting ───────────────────────────────────────────
     let css = CssProvider::new();
     css.load_from_resource("/com/github/virgola/style.css");
@@ -36,7 +69,6 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
         .default_height(600)
         .build();
 
-    let state: Rc<RefCell<State>> = Rc::new(RefCell::new(State::new()));
     let toolbar = Rc::new(Toolbar::new());
     let table = Rc::new(Table::new());
 
@@ -71,66 +103,34 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
     toolbar_view.set_content(Some(&vbox));
     window.set_content(Some(&toolbar_view));
 
+    let ctx = UiContext {
+        state: Rc::new(RefCell::new(State::new())),
+        table,
+        toolbar,
+        window,
+        sep_prev_idx: Rc::new(Cell::new(0)),
+        sep_reverting: Rc::new(Cell::new(false)),
+        enc_reverting: Rc::new(Cell::new(false)),
+    };
+
     // ── on_dirty: update title and re-enable save when a cell is edited ───────
     {
-        let window_d = window.clone();
-        let state_d = Rc::clone(&state);
-        let save_btn_d = toolbar.save_btn.clone();
-        table.set_on_dirty(Rc::new(move || {
-            let st = state_d.borrow();
-            update_title(&window_d, st.path.as_deref(), true);
-            save_btn_d.set_sensitive(true);
+        let c = ctx.clone();
+        ctx.table.set_on_dirty(Rc::new(move || {
+            let st = c.state.borrow();
+            update_title(&c.window, st.path.as_deref(), true);
+            c.toolbar.save_btn.set_sensitive(true);
         }));
     }
 
-    // Shared state for silently syncing the separator dropdown (used by both
-    // the open button and the separator dropdown handlers below).
-    let sep_prev_idx: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-    let sep_reverting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-
-    // Equivalent guard for the encoding dropdown.
-    let enc_reverting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-
-    setup_open_handler(
-        &toolbar.open_btn,
-        Rc::clone(&state),
-        Rc::clone(&table),
-        Rc::clone(&toolbar),
-        &window,
-        Rc::clone(&sep_prev_idx),
-        Rc::clone(&sep_reverting),
-        Rc::clone(&enc_reverting),
-    );
-    setup_save_handler(&toolbar.save_btn, Rc::clone(&state), &window);
-    setup_about_handler(&toolbar.about_btn, &toolbar.menu_popover, &window);
-    setup_separator_handler(
-        &toolbar.sep_dropdown,
-        Rc::clone(&state),
-        Rc::clone(&table),
-        Rc::clone(&toolbar),
-        &window,
-        Rc::clone(&sep_prev_idx),
-        Rc::clone(&sep_reverting),
-        Rc::clone(&enc_reverting),
-    );
-    setup_encoding_handler(
-        &toolbar.enc_dropdown,
-        Rc::clone(&state),
-        Rc::clone(&table),
-        Rc::clone(&toolbar),
-        &window,
-        Rc::clone(&enc_reverting),
-    );
-    setup_search_visibility(
-        &toolbar.search_btn,
-        &search_bar,
-        &search_entry,
-        &window,
-        Rc::clone(&state),
-        Rc::clone(&table),
-    );
-    setup_search_entry(&search_entry, Rc::clone(&state), Rc::clone(&table));
-    setup_navigation_buttons(&prev_btn, &next_btn, Rc::clone(&state), Rc::clone(&table));
+    setup_open_handler(ctx.clone());
+    setup_save_handler(ctx.clone());
+    setup_about_handler(ctx.clone());
+    setup_separator_handler(ctx.clone());
+    setup_encoding_handler(ctx.clone());
+    setup_search_visibility(ctx.clone(), &search_bar, &search_entry);
+    setup_search_entry(&search_entry, ctx.clone());
+    setup_navigation_buttons(&prev_btn, &next_btn, ctx.clone());
 
     // ── CLI / desktop: open file passed by the caller ────────────────────────
     //
@@ -140,104 +140,79 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
     if let Some(path) = initial_path {
         let sep = csv_handler::detect_separator(&path);
         if let Some(idx) = Toolbar::index_of_separator(sep) {
-            sep_reverting.set(true);
-            toolbar.sep_dropdown.set_selected(idx);
-            sep_reverting.set(false);
-            sep_prev_idx.set(idx);
+            ctx.sep_reverting.set(true);
+            ctx.toolbar.sep_dropdown.set_selected(idx);
+            ctx.sep_reverting.set(false);
+            ctx.sep_prev_idx.set(idx);
         }
-        load_csv_into_state(
-            path,
-            sep,
-            None,
-            &state,
-            &table,
-            &window,
-            &toolbar,
-            &enc_reverting,
-        );
+        load_csv_into_state(path, sep, None, &ctx);
     }
 
-    window.present();
+    ctx.window.present();
+
+    if extra_files > 0 {
+        show_message_dialog(
+            &ctx.window,
+            "Only One File at a Time",
+            &format!(
+                "{extra_files} additional {} ignored. \
+                 Virgola opens one file per window.",
+                if extra_files == 1 {
+                    "file was"
+                } else {
+                    "files were"
+                }
+            ),
+        );
+    }
 }
 
 // ── Signal handler setup ──────────────────────────────────────────────────────
 
-fn setup_open_handler(
-    open_btn: &Button,
-    state: Rc<RefCell<State>>,
-    table: Rc<Table>,
-    toolbar: Rc<Toolbar>,
-    window: &ApplicationWindow,
-    sep_prev_idx: Rc<Cell<u32>>,
-    sep_reverting: Rc<Cell<bool>>,
-    enc_reverting: Rc<Cell<bool>>,
-) {
-    let window = window.clone();
+fn setup_open_handler(ctx: UiContext) {
+    let open_btn = ctx.toolbar.open_btn.clone();
     open_btn.connect_clicked(move |_| {
         let do_open = {
-            let state = Rc::clone(&state);
-            let table = Rc::clone(&table);
-            let toolbar = Rc::clone(&toolbar);
-            let window = window.clone();
-            let sep_prev_idx = Rc::clone(&sep_prev_idx);
-            let sep_reverting = Rc::clone(&sep_reverting);
-            let enc_reverting = Rc::clone(&enc_reverting);
+            let ctx = ctx.clone();
             move || {
-                let state2 = Rc::clone(&state);
-                let table2 = Rc::clone(&table);
-                let toolbar2 = Rc::clone(&toolbar);
-                let window_cb = window.clone();
-                let sep_prev_idx = Rc::clone(&sep_prev_idx);
-                let sep_reverting = Rc::clone(&sep_reverting);
-                let enc_reverting = Rc::clone(&enc_reverting);
+                let ctx2 = ctx.clone();
                 let dialog = make_open_dialog();
-                dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
+                dialog.open(Some(&ctx.window), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result
                         && let Some(path) = file.path()
                     {
                         let sep = csv_handler::detect_separator(&path);
-                        // Silently update the separator dropdown to match the
-                        // detected separator so the UI stays in sync.
+                        // Silently update the separator dropdown to match
+                        // the detected separator so the UI stays in sync.
                         if let Some(idx) = Toolbar::index_of_separator(sep) {
-                            sep_reverting.set(true);
-                            toolbar2.sep_dropdown.set_selected(idx);
-                            sep_reverting.set(false);
-                            sep_prev_idx.set(idx);
+                            ctx2.sep_reverting.set(true);
+                            ctx2.toolbar.sep_dropdown.set_selected(idx);
+                            ctx2.sep_reverting.set(false);
+                            ctx2.sep_prev_idx.set(idx);
                         }
                         // Encoding is auto-detected inside load_csv_into_state
                         // and the enc_dropdown is synced there.
-                        load_csv_into_state(
-                            path,
-                            sep,
-                            None,
-                            &state2,
-                            &table2,
-                            &window_cb,
-                            &toolbar2,
-                            &enc_reverting,
-                        );
+                        load_csv_into_state(path, sep, None, &ctx2);
                     }
                 });
             }
         };
 
-        if state.borrow().dirty {
-            confirm_discard(&window, do_open);
+        if ctx.state.borrow().dirty {
+            confirm_discard(&ctx.window, do_open);
         } else {
             do_open();
         }
     });
 }
 
-fn setup_save_handler(save_btn: &Button, state: Rc<RefCell<State>>, window: &ApplicationWindow) {
-    let window = window.clone();
+fn setup_save_handler(ctx: UiContext) {
+    let save_btn = ctx.toolbar.save_btn.clone();
     save_btn.connect_clicked(move |btn| {
-        let path = state.borrow().path.clone();
-        let state_c = Rc::clone(&state);
-        let window_c = window.clone();
-        let btn_c = btn.clone();
+        let path = ctx.state.borrow().path.clone();
+        let btn = btn.clone();
         if let Some(path) = path {
-            let st = state_c.borrow();
+            let st = ctx.state.borrow();
             match csv_handler::write_csv(
                 &path,
                 st.separator,
@@ -248,24 +223,25 @@ fn setup_save_handler(save_btn: &Button, state: Rc<RefCell<State>>, window: &App
             ) {
                 Err(e) => {
                     drop(st);
-                    show_message_dialog(&window_c, "Could not save file", &e.to_string());
+                    show_message_dialog(&ctx.window, "Could not save file", &e.to_string());
                 }
                 Ok(()) => {
                     drop(st);
-                    state_c.borrow_mut().dirty = false;
-                    update_title(&window_c, Some(&path), false);
-                    btn_c.set_sensitive(false);
+                    ctx.state.borrow_mut().dirty = false;
+                    update_title(&ctx.window, Some(&path), false);
+                    btn.set_sensitive(false);
                 }
             }
         } else {
             // No path yet — show Save As dialog, pre-filled with a name.
-            let current_path = state_c.borrow().path.clone();
+            let current_path = ctx.state.borrow().path.clone();
             let dialog = make_save_dialog(current_path.as_deref());
-            dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
+            let ctx2 = ctx.clone();
+            dialog.save(Some(&ctx.window), gio::Cancellable::NONE, move |result| {
                 if let Ok(file) = result
                     && let Some(path) = file.path()
                 {
-                    let st = state_c.borrow();
+                    let st = ctx2.state.borrow();
                     match csv_handler::write_csv(
                         &path,
                         st.separator,
@@ -276,15 +252,19 @@ fn setup_save_handler(save_btn: &Button, state: Rc<RefCell<State>>, window: &App
                     ) {
                         Err(e) => {
                             drop(st);
-                            show_message_dialog(&window_c, "Could not save file", &e.to_string());
+                            show_message_dialog(
+                                &ctx2.window,
+                                "Could not save file",
+                                &e.to_string(),
+                            );
                         }
                         Ok(()) => {
                             drop(st);
-                            let mut st = state_c.borrow_mut();
+                            let mut st = ctx2.state.borrow_mut();
                             st.dirty = false;
                             st.path = Some(path.clone());
-                            update_title(&window_c, Some(&path), false);
-                            btn_c.set_sensitive(false);
+                            update_title(&ctx2.window, Some(&path), false);
+                            btn.set_sensitive(false);
                         }
                     }
                 }
@@ -293,9 +273,9 @@ fn setup_save_handler(save_btn: &Button, state: Rc<RefCell<State>>, window: &App
     });
 }
 
-fn setup_about_handler(about_btn: &Button, menu_popover: &Popover, window: &ApplicationWindow) {
-    let popover = menu_popover.clone();
-    let window = window.clone();
+fn setup_about_handler(ctx: UiContext) {
+    let about_btn = ctx.toolbar.about_btn.clone();
+    let popover = ctx.toolbar.menu_popover.clone();
     about_btn.connect_clicked(move |_| {
         popover.popdown();
         let about = AboutDialog::builder()
@@ -305,56 +285,36 @@ fn setup_about_handler(about_btn: &Button, menu_popover: &Popover, window: &Appl
             .comments("A simple CSV viewer and editor")
             .license_type(License::Gpl30)
             .build();
-        about.present(Some(&window));
+        about.present(Some(&ctx.window));
     });
 }
 
-fn setup_separator_handler(
-    sep_dropdown: &DropDown,
-    state: Rc<RefCell<State>>,
-    table: Rc<Table>,
-    toolbar: Rc<Toolbar>,
-    window: &ApplicationWindow,
-    sep_prev_idx: Rc<Cell<u32>>,
-    sep_reverting: Rc<Cell<bool>>,
-    enc_reverting: Rc<Cell<bool>>,
-) {
-    let window = window.clone();
-    let popover = toolbar.menu_popover.clone();
+fn setup_separator_handler(ctx: UiContext) {
+    let sep_dropdown = ctx.toolbar.sep_dropdown.clone();
+    let popover = ctx.toolbar.menu_popover.clone();
     sep_dropdown.connect_selected_notify({
-        let prev_idx = sep_prev_idx.clone();
-        let reverting = sep_reverting.clone();
+        let prev_idx = Rc::clone(&ctx.sep_prev_idx);
+        let reverting = Rc::clone(&ctx.sep_reverting);
         move |dd| {
             if reverting.get() {
                 return;
             }
-            match toolbar.current_separator() {
+            match ctx.toolbar.current_separator() {
                 Some(sep) => {
                     prev_idx.set(dd.selected());
-                    apply_separator(&state, &table, &window, &toolbar, &enc_reverting, sep);
+                    apply_separator(&ctx, sep);
                 }
                 None => {
-                    let state_c = Rc::clone(&state);
-                    let table_c = Rc::clone(&table);
-                    let toolbar_c = Rc::clone(&toolbar);
-                    let window_c = window.clone();
-                    let enc_reverting_c = Rc::clone(&enc_reverting);
+                    let ctx2 = ctx.clone();
                     let dd_c = dd.clone();
                     let prev = prev_idx.get();
                     let reverting_c = reverting.clone();
                     let prev_idx_c = prev_idx.clone();
                     let popover_c = popover.clone();
-                    show_custom_separator_dialog(&window, move |maybe_sep| match maybe_sep {
+                    show_custom_separator_dialog(&ctx.window, move |maybe_sep| match maybe_sep {
                         Some(sep) => {
                             prev_idx_c.set(CUSTOM_SEP_IDX);
-                            apply_separator(
-                                &state_c,
-                                &table_c,
-                                &window_c,
-                                &toolbar_c,
-                                &enc_reverting_c,
-                                sep,
-                            );
+                            apply_separator(&ctx2, sep);
                         }
                         None => {
                             reverting_c.set(true);
@@ -369,39 +329,25 @@ fn setup_separator_handler(
     });
 }
 
-fn setup_encoding_handler(
-    enc_dropdown: &DropDown,
-    state: Rc<RefCell<State>>,
-    table: Rc<Table>,
-    toolbar: Rc<Toolbar>,
-    window: &ApplicationWindow,
-    enc_reverting: Rc<Cell<bool>>,
-) {
-    let window = window.clone();
+fn setup_encoding_handler(ctx: UiContext) {
+    let enc_dropdown = ctx.toolbar.enc_dropdown.clone();
     enc_dropdown.connect_selected_notify(move |_| {
-        if enc_reverting.get() {
+        if ctx.enc_reverting.get() {
             return;
         }
-        let (enc, bom) = toolbar.current_encoding();
-        apply_encoding(&state, &table, &window, &toolbar, &enc_reverting, enc, bom);
+        let (enc, bom) = ctx.toolbar.current_encoding();
+        apply_encoding(&ctx, enc, bom);
     });
 }
 
 /// Wires the search toggle button, the Ctrl+F keyboard shortcut, and the
 /// search bar's close (Escape) signal so they all stay in sync.
-fn setup_search_visibility(
-    search_btn: &ToggleButton,
-    search_bar: &SearchBar,
-    search_entry: &SearchEntry,
-    window: &ApplicationWindow,
-    state: Rc<RefCell<State>>,
-    table: Rc<Table>,
-) {
+fn setup_search_visibility(ctx: UiContext, search_bar: &SearchBar, search_entry: &SearchEntry) {
     // Toggle button → open/close bar
     {
         let search_bar_c = search_bar.clone();
         let search_entry_c = search_entry.clone();
-        search_btn.connect_toggled(move |btn| {
+        ctx.toolbar.search_btn.connect_toggled(move |btn| {
             if btn.is_active() {
                 open_search_bar(&search_bar_c, &search_entry_c);
             } else {
@@ -422,18 +368,18 @@ fn setup_search_visibility(
             }
             glib::Propagation::Proceed
         });
-        window.add_controller(ctrl);
+        ctx.window.add_controller(ctrl);
     }
 
     // Bar closed via Escape → sync toggle button and clear highlights
     {
-        let search_btn = search_btn.clone();
+        let search_bar = search_bar.clone();
         search_bar.connect_notify_local(Some("search-mode-enabled"), move |bar, _| {
             let active = bar.is_search_mode();
-            search_btn.set_active(active);
+            ctx.toolbar.search_btn.set_active(active);
             if !active {
-                state.borrow_mut().clear_search();
-                table.refresh_matches(&state.borrow());
+                ctx.state.borrow_mut().clear_search();
+                ctx.table.refresh_matches(&ctx.state.borrow());
             }
         });
     }
@@ -443,27 +389,26 @@ fn setup_search_visibility(
 ///
 /// Empty queries clear highlights immediately; non-empty queries are delayed
 /// so rapid keystrokes don't scan the full dataset on every character.
-fn setup_search_entry(entry: &SearchEntry, state: Rc<RefCell<State>>, table: Rc<Table>) {
+fn setup_search_entry(entry: &SearchEntry, ctx: UiContext) {
     let debounce: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
     entry.connect_search_changed(move |entry| {
         if let Some(id) = debounce.take() {
             id.remove();
         }
         let text = entry.text().to_string();
-        let state = Rc::clone(&state);
-        let table = Rc::clone(&table);
         if text.is_empty() {
-            state.borrow_mut().update_search("");
-            table.refresh_matches(&state.borrow());
+            ctx.state.borrow_mut().update_search("");
+            ctx.table.refresh_matches(&ctx.state.borrow());
         } else {
+            let ctx2 = ctx.clone();
             let debounce2 = Rc::clone(&debounce);
             let id =
                 glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
                     debounce2.take(); // clear before glib auto-removes the source
-                    let first_row = state.borrow_mut().update_search(&text);
-                    table.refresh_matches(&state.borrow());
+                    let first_row = ctx2.state.borrow_mut().update_search(&text);
+                    ctx2.table.refresh_matches(&ctx2.state.borrow());
                     if let Some(row) = first_row {
-                        table.scroll_to_match(row);
+                        ctx2.table.scroll_to_match(row);
                     }
                 });
             debounce.set(Some(id));
@@ -471,121 +416,72 @@ fn setup_search_entry(entry: &SearchEntry, state: Rc<RefCell<State>>, table: Rc<
     });
 }
 
-fn setup_navigation_buttons(
-    prev_btn: &Button,
-    next_btn: &Button,
-    state: Rc<RefCell<State>>,
-    table: Rc<Table>,
-) {
+fn setup_navigation_buttons(prev_btn: &Button, next_btn: &Button, ctx: UiContext) {
     {
-        let state = Rc::clone(&state);
-        let table = Rc::clone(&table);
-        prev_btn.connect_clicked(move |_| navigate(&state, &table, Direction::Prev));
+        let ctx2 = ctx.clone();
+        prev_btn.connect_clicked(move |_| navigate(&ctx2, Direction::Prev));
     }
-    {
-        next_btn.connect_clicked(move |_| navigate(&state, &table, Direction::Next));
-    }
+    next_btn.connect_clicked(move |_| navigate(&ctx, Direction::Next));
 }
 
 // ── Action helpers ────────────────────────────────────────────────────────────
 
-fn navigate(state: &Rc<RefCell<State>>, table: &Rc<Table>, dir: Direction) {
-    let row = state.borrow_mut().step_match(dir);
-    table.refresh_matches(&state.borrow());
+fn navigate(ctx: &UiContext, dir: Direction) {
+    let row = ctx.state.borrow_mut().step_match(dir);
+    ctx.table.refresh_matches(&ctx.state.borrow());
     if let Some(row) = row {
-        table.scroll_to_match(row);
+        ctx.table.scroll_to_match(row);
     }
 }
 
-fn apply_separator(
-    state: &Rc<RefCell<State>>,
-    table: &Rc<Table>,
-    window: &ApplicationWindow,
-    toolbar: &Rc<Toolbar>,
-    enc_reverting: &Rc<Cell<bool>>,
-    sep: u8,
-) {
+fn apply_separator(ctx: &UiContext, sep: u8) {
     let (dirty, has_file) = {
-        let st = state.borrow();
+        let st = ctx.state.borrow();
         (st.dirty, st.path.is_some())
     };
 
     let do_apply = {
-        let state = Rc::clone(state);
-        let table = Rc::clone(table);
-        let window = window.clone();
-        let toolbar = Rc::clone(toolbar);
-        let enc_reverting = Rc::clone(enc_reverting);
+        let ctx = ctx.clone();
         move || {
             // Store the chosen separator (also used for future opens).
-            state.borrow_mut().separator = sep;
+            ctx.state.borrow_mut().separator = sep;
             // Keep the current encoding — only the separator changed.
             let (path, enc, bom) = {
-                let st = state.borrow();
+                let st = ctx.state.borrow();
                 (st.path.clone(), st.encoding, st.encoding_bom)
             };
             if let Some(path) = path {
-                load_csv_into_state(
-                    path,
-                    sep,
-                    Some((enc, bom)),
-                    &state,
-                    &table,
-                    &window,
-                    &toolbar,
-                    &enc_reverting,
-                );
+                load_csv_into_state(path, sep, Some((enc, bom)), &ctx);
             }
         }
     };
 
     if dirty && has_file {
-        confirm_discard(window, do_apply);
+        confirm_discard(&ctx.window, do_apply);
     } else {
         do_apply();
     }
 }
 
-fn apply_encoding(
-    state: &Rc<RefCell<State>>,
-    table: &Rc<Table>,
-    window: &ApplicationWindow,
-    toolbar: &Rc<Toolbar>,
-    enc_reverting: &Rc<Cell<bool>>,
-    enc: &'static encoding_rs::Encoding,
-    bom: bool,
-) {
+fn apply_encoding(ctx: &UiContext, enc: &'static encoding_rs::Encoding, bom: bool) {
     let (dirty, has_file) = {
-        let st = state.borrow();
+        let st = ctx.state.borrow();
         (st.dirty, st.path.is_some())
     };
 
     let do_apply = {
-        let state = Rc::clone(state);
-        let table = Rc::clone(table);
-        let window = window.clone();
-        let toolbar = Rc::clone(toolbar);
-        let enc_reverting = Rc::clone(enc_reverting);
+        let ctx = ctx.clone();
         move || {
             let (path, sep) = {
-                let st = state.borrow();
+                let st = ctx.state.borrow();
                 (st.path.clone(), st.separator)
             };
             if let Some(path) = path {
                 // Re-read the file with the explicitly chosen encoding.
-                load_csv_into_state(
-                    path,
-                    sep,
-                    Some((enc, bom)),
-                    &state,
-                    &table,
-                    &window,
-                    &toolbar,
-                    &enc_reverting,
-                );
+                load_csv_into_state(path, sep, Some((enc, bom)), &ctx);
             } else {
                 // No file open yet — just store the encoding preference.
-                let mut st = state.borrow_mut();
+                let mut st = ctx.state.borrow_mut();
                 st.encoding = enc;
                 st.encoding_bom = bom;
             }
@@ -593,7 +489,7 @@ fn apply_encoding(
     };
 
     if dirty && has_file {
-        confirm_discard(window, do_apply);
+        confirm_discard(&ctx.window, do_apply);
     } else {
         do_apply();
     }
@@ -613,17 +509,13 @@ fn load_csv_into_state(
     path: PathBuf,
     sep: u8,
     encoding_hint: Option<(&'static encoding_rs::Encoding, bool)>,
-    state: &Rc<RefCell<State>>,
-    table: &Rc<Table>,
-    window: &ApplicationWindow,
-    toolbar: &Rc<Toolbar>,
-    enc_reverting: &Rc<Cell<bool>>,
+    ctx: &UiContext,
 ) {
     match csv_handler::read_csv(&path, sep, encoding_hint) {
         Ok(csv) => {
             let had_jagged = csv.had_jagged_rows;
             {
-                let mut st = state.borrow_mut();
+                let mut st = ctx.state.borrow_mut();
                 st.path = Some(path.clone());
                 st.separator = sep;
                 st.encoding = csv.encoding;
@@ -635,18 +527,18 @@ fn load_csv_into_state(
             }
             // Sync encoding dropdown to the (possibly auto-detected) encoding.
             {
-                let st = state.borrow();
+                let st = ctx.state.borrow();
                 let idx = Toolbar::index_of_encoding(st.encoding, st.encoding_bom);
-                enc_reverting.set(true);
-                toolbar.enc_dropdown.set_selected(idx);
-                enc_reverting.set(false);
+                ctx.enc_reverting.set(true);
+                ctx.toolbar.enc_dropdown.set_selected(idx);
+                ctx.enc_reverting.set(false);
             }
-            table.load(Rc::clone(state));
-            update_title(window, Some(&path), false);
-            toolbar.save_btn.set_sensitive(false);
+            ctx.table.load(Rc::clone(&ctx.state));
+            update_title(&ctx.window, Some(&path), false);
+            ctx.toolbar.save_btn.set_sensitive(false);
             if had_jagged {
                 show_message_dialog(
-                    window,
+                    &ctx.window,
                     "Inconsistent Column Count",
                     "Some rows have fewer columns than the header row.\n\
                      Missing fields are displayed as empty cells and will be \
@@ -654,7 +546,7 @@ fn load_csv_into_state(
                 );
             }
         }
-        Err(e) => show_message_dialog(window, "Could not open file", &e.to_string()),
+        Err(e) => show_message_dialog(&ctx.window, "Could not open file", &e.to_string()),
     }
 }
 
