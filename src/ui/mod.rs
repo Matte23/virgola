@@ -284,6 +284,9 @@ fn setup_about_handler(ctx: UiContext) {
             .version(env!("CARGO_PKG_VERSION"))
             .comments("A simple CSV viewer and editor")
             .license_type(License::Gpl30)
+            .issue_url("https://github.com/Matte23/virgola/issues")
+            .copyright("© 2026 Matteo Schiff")
+            .website("https://github.com/Matte23/virgola")
             .build();
         about.present(Some(&ctx.window));
     });
