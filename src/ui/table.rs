@@ -8,12 +8,34 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+fn apply_highlight(cell_box: &GtkBox, row: usize, col: usize, state: &State) {
+    let is_current = state
+        .search
+        .current_match
+        .and_then(|i| state.search.matches_ordered.get(i))
+        .is_some_and(|&m| m == (row, col));
+    let is_match = state.search.matches.contains(&(row, col));
+
+    if is_current {
+        cell_box.add_css_class("search-match-current");
+        cell_box.remove_css_class("search-match");
+    } else if is_match {
+        cell_box.add_css_class("search-match");
+        cell_box.remove_css_class("search-match-current");
+    } else {
+        cell_box.remove_css_class("search-match");
+        cell_box.remove_css_class("search-match-current");
+    }
+}
+
 pub struct Table {
     pub scrolled: ScrolledWindow,
     pub column_view: ColumnView,
     current_store: RefCell<Option<gio::ListStore>>,
     // Called whenever a cell edit sets state.dirty = true.
     on_dirty: RefCell<Option<Rc<dyn Fn()>>>,
+    // Maps (row, col) → currently-bound cell box for direct CSS updates.
+    cell_registry: Rc<RefCell<HashMap<(usize, usize), GtkBox>>>,
 }
 
 impl Default for Table {
@@ -41,6 +63,7 @@ impl Table {
             column_view,
             current_store: RefCell::new(None),
             on_dirty: RefCell::new(None),
+            cell_registry: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -48,19 +71,14 @@ impl Table {
         *self.on_dirty.borrow_mut() = Some(f);
     }
 
-    /// Force all visible cells to rebind so search highlights are updated.
+    /// Update CSS highlight classes on all currently-visible cells.
     ///
-    /// Uses `ListStore::splice` to replace items with themselves, which emits
-    /// `items-changed(0, n, n)` and triggers unbind→bind on all visible cells
-    /// WITHOUT swapping the model — so the scroll adjustment is never touched
-    /// and the `gtk_adjustment_configure` assertion cannot fire.
-    pub fn refresh_matches(&self) {
-        if let Some(store) = self.current_store.borrow().as_ref() {
-            let n = store.n_items();
-            if n > 0 {
-                let items: Vec<glib::Object> = (0..n).filter_map(|i| store.item(i)).collect();
-                store.splice(0, n, &items);
-            }
+    /// Directly iterates the cell registry (bound widgets only) and applies
+    /// the correct CSS class based on the current search state — no store
+    /// splice or rebind required.
+    pub fn refresh_matches(&self, state: &State) {
+        for (&(row, col), cell_box) in self.cell_registry.borrow().iter() {
+            apply_highlight(cell_box, row, col, state);
         }
     }
 
@@ -137,6 +155,7 @@ impl Table {
 
         drop(st);
 
+        self.cell_registry.borrow_mut().clear();
         *self.current_store.borrow_mut() = Some(store.clone());
 
         let selection = NoSelection::new(Some(store.clone()));
@@ -175,6 +194,7 @@ impl Table {
                 let store = store.clone();
                 let handler_map = handler_map.clone();
                 let on_dirty_cb = on_dirty_cb.clone();
+                let cell_registry = Rc::clone(&self.cell_registry);
                 move |_, obj| {
                     let list_item = obj
                         .downcast_ref::<ListItem>()
@@ -208,27 +228,14 @@ impl Table {
                         label.set_text(row.get(col_idx).map(String::as_str).unwrap_or(""));
                     }
 
-                    // ── 2. Apply search highlighting ──────────────────────────
+                    // ── 2. Apply search highlighting & register widget ────────
                     {
                         let st = state.borrow();
-                        let is_current = st
-                            .search
-                            .current_match
-                            .and_then(|i| st.search.matches_ordered.get(i))
-                            .is_some_and(|&m| m == (pos, col_idx));
-                        let is_match = st.search.matches.contains(&(pos, col_idx));
-
-                        if is_current {
-                            cell_box.add_css_class("search-match-current");
-                            cell_box.remove_css_class("search-match");
-                        } else if is_match {
-                            cell_box.add_css_class("search-match");
-                            cell_box.remove_css_class("search-match-current");
-                        } else {
-                            cell_box.remove_css_class("search-match");
-                            cell_box.remove_css_class("search-match-current");
-                        }
+                        apply_highlight(&cell_box, pos, col_idx, &st);
                     }
+                    cell_registry
+                        .borrow_mut()
+                        .insert((pos, col_idx), cell_box.clone());
 
                     // ── 3. Connect edit handler (after set_text — safe) ───────
                     //
@@ -275,6 +282,7 @@ impl Table {
 
             factory.connect_unbind({
                 let handler_map = handler_map.clone();
+                let cell_registry = Rc::clone(&self.cell_registry);
                 move |_, obj| {
                     let list_item = obj
                         .downcast_ref::<ListItem>()
@@ -290,8 +298,8 @@ impl Table {
                         .downcast::<EditableLabel>()
                         .expect("first child should be an EditableLabel");
 
-                    cell_box.remove_css_class("search-match");
-                    cell_box.remove_css_class("search-match-current");
+                    let pos = list_item.position() as usize;
+                    cell_registry.borrow_mut().remove(&(pos, col_idx));
 
                     let key = label.as_ptr() as usize;
                     if let Some(id) = handler_map.borrow_mut().remove(&key) {

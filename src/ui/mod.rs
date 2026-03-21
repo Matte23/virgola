@@ -324,7 +324,7 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
             search_btn.set_active(active);
             if !active {
                 state.borrow_mut().clear_search();
-                table.refresh_matches();
+                table.refresh_matches(&state.borrow());
             }
         });
     }
@@ -347,13 +347,15 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
             let table = Rc::clone(&table);
             if text.is_empty() {
                 state.borrow_mut().update_search("");
-                table.refresh_matches();
+                table.refresh_matches(&state.borrow());
             } else {
+                let debounce2 = Rc::clone(&debounce);
                 let id = glib::timeout_add_local_once(
                     std::time::Duration::from_millis(150),
                     move || {
+                        debounce2.take(); // clear before glib auto-removes the source
                         let first_row = state.borrow_mut().update_search(&text);
-                        table.refresh_matches();
+                        table.refresh_matches(&state.borrow());
                         if let Some(row) = first_row {
                             table.scroll_to_match(row);
                         }
@@ -397,7 +399,7 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
 
 fn navigate(state: &Rc<RefCell<State>>, table: &Rc<Table>, dir: Direction) {
     let row = state.borrow_mut().step_match(dir);
-    table.refresh_matches();
+    table.refresh_matches(&state.borrow());
     if let Some(row) = row {
         table.scroll_to_match(row);
     }
@@ -489,10 +491,7 @@ fn open_search_bar(bar: &SearchBar, entry: &SearchEntry) {
 
 /// Show a modal informational/error dialog with a bold title and a detail line.
 fn show_message_dialog(window: &ApplicationWindow, title: &str, detail: &str) {
-    let dialog = AlertDialog::builder()
-        .heading(title)
-        .body(detail)
-        .build();
+    let dialog = AlertDialog::builder().heading(title).body(detail).build();
     dialog.add_response("ok", "OK");
     dialog.present(Some(window));
 }
