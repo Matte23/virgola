@@ -26,13 +26,8 @@ use toolbar::{CUSTOM_SEP_IDX, Toolbar};
 
 pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>) {
     // ── CSS for search highlighting ───────────────────────────────────────────
-    // TODO: move CSS into a GResource file (style.css) instead of an inline
-    //       string.  That also makes it easy to support a dark-mode variant.
     let css = CssProvider::new();
-    css.load_from_string(
-        ".search-match { background-color: rgba(255, 220, 0, 0.55); }
-         .search-match-current { background-color: rgba(255, 140, 0, 0.75); }",
-    );
+    css.load_from_resource("/com/github/virgola/style.css");
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().expect("no default display"),
         &css,

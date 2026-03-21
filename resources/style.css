@@ -1,0 +1,8 @@
+/* Named color tokens for search highlighting.
+ * To make these user-configurable, load a higher-priority CssProvider
+ * that redefines these names — no changes to table or search code needed. */
+@define-color search_match rgba(255, 220, 0, 0.55);
+@define-color search_match_current rgba(255, 140, 0, 0.75);
+
+.search-match         { background-color: @search_match; }
+.search-match-current { background-color: @search_match_current; }

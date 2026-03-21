@@ -8,8 +8,8 @@ use adw::{Application, gio};
 const APP_ID: &str = "com.github.virgola";
 
 fn main() {
-    // TODO: load a GResource bundle instead of hardcoding CSS strings and icon
-    //       names scattered across the UI modules.
+    gio::resources_register_include!("virgola.gresource")
+        .expect("failed to register GResource bundle");
 
     let app = Application::builder()
         .application_id(APP_ID)
