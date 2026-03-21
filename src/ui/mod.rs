@@ -210,18 +210,26 @@ fn setup_open_handler(ctx: UiContext) {
                     if let Ok(file) = result
                         && let Some(path) = file.path()
                     {
-                        let sep = csv_handler::detect_separator(&path);
-                        // Silently update the separator dropdown to match
-                        // the detected separator so the UI stays in sync.
-                        if let Some(idx) = Sidebar::index_of_separator(sep) {
-                            ctx2.sep_reverting.set(true);
-                            ctx2.sidebar.sep_row.set_selected(idx);
-                            ctx2.sep_reverting.set(false);
-                            ctx2.sep_prev_idx.set(idx);
-                        }
-                        // Encoding is auto-detected inside load_csv_into_state
-                        // and the enc_dropdown is synced there.
-                        load_csv_into_state(path, sep, None, &ctx2);
+                        let ctx2 = ctx2.clone();
+                        glib::spawn_future_local(async move {
+                            let path_bg = path.clone();
+                            let sep = gio::spawn_blocking(move || {
+                                csv_handler::detect_separator(&path_bg)
+                            })
+                            .await
+                            .expect("blocking task panicked");
+                            // Silently update the separator dropdown to match
+                            // the detected separator so the UI stays in sync.
+                            if let Some(idx) = Sidebar::index_of_separator(sep) {
+                                ctx2.sep_reverting.set(true);
+                                ctx2.sidebar.sep_row.set_selected(idx);
+                                ctx2.sep_reverting.set(false);
+                                ctx2.sep_prev_idx.set(idx);
+                            }
+                            // Encoding is auto-detected inside load_csv_into_state
+                            // and the enc_dropdown is synced there.
+                            load_csv_into_state(path, sep, None, &ctx2);
+                        });
                     }
                 });
             }
@@ -241,26 +249,35 @@ fn setup_save_handler(ctx: UiContext) {
         let path = ctx.state.borrow().path.clone();
         let btn = btn.clone();
         if let Some(path) = path {
-            let st = ctx.state.borrow();
-            match csv_handler::write_csv(
-                &path,
-                st.separator,
-                &st.headers,
-                &st.rows,
-                st.encoding,
-                st.encoding_bom,
-            ) {
-                Err(e) => {
-                    drop(st);
-                    show_message_dialog(&ctx.window, "Could not save file", &e.to_string());
+            let (sep, headers, rows, encoding, encoding_bom) = {
+                let st = ctx.state.borrow();
+                (
+                    st.separator,
+                    st.headers.clone(),
+                    st.rows.clone(),
+                    st.encoding,
+                    st.encoding_bom,
+                )
+            };
+            let ctx2 = ctx.clone();
+            glib::spawn_future_local(async move {
+                let result = gio::spawn_blocking(move || {
+                    csv_handler::write_csv(&path, sep, &headers, &rows, encoding, encoding_bom)
+                        .map(|()| path)
+                })
+                .await
+                .expect("blocking task panicked");
+                match result {
+                    Ok(path) => {
+                        ctx2.state.borrow_mut().dirty = false;
+                        update_title(&ctx2.window, Some(&path), false);
+                        btn.set_sensitive(false);
+                    }
+                    Err(e) => {
+                        show_message_dialog(&ctx2.window, "Could not save file", &e.to_string())
+                    }
                 }
-                Ok(()) => {
-                    drop(st);
-                    ctx.state.borrow_mut().dirty = false;
-                    update_title(&ctx.window, Some(&path), false);
-                    btn.set_sensitive(false);
-                }
-            }
+            });
         } else {
             // No path yet — show Save As dialog, pre-filled with a name.
             let current_path = ctx.state.borrow().path.clone();
@@ -270,32 +287,47 @@ fn setup_save_handler(ctx: UiContext) {
                 if let Ok(file) = result
                     && let Some(path) = file.path()
                 {
-                    let st = ctx2.state.borrow();
-                    match csv_handler::write_csv(
-                        &path,
-                        st.separator,
-                        &st.headers,
-                        &st.rows,
-                        st.encoding,
-                        st.encoding_bom,
-                    ) {
-                        Err(e) => {
-                            drop(st);
-                            show_message_dialog(
-                                &ctx2.window,
+                    let (sep, headers, rows, encoding, encoding_bom) = {
+                        let st = ctx2.state.borrow();
+                        (
+                            st.separator,
+                            st.headers.clone(),
+                            st.rows.clone(),
+                            st.encoding,
+                            st.encoding_bom,
+                        )
+                    };
+                    let ctx3 = ctx2.clone();
+                    glib::spawn_future_local(async move {
+                        let result = gio::spawn_blocking(move || {
+                            csv_handler::write_csv(
+                                &path,
+                                sep,
+                                &headers,
+                                &rows,
+                                encoding,
+                                encoding_bom,
+                            )
+                            .map(|()| path)
+                        })
+                        .await
+                        .expect("blocking task panicked");
+                        match result {
+                            Ok(path) => {
+                                let mut st = ctx3.state.borrow_mut();
+                                st.dirty = false;
+                                st.path = Some(path.clone());
+                                drop(st);
+                                update_title(&ctx3.window, Some(&path), false);
+                                btn.set_sensitive(false);
+                            }
+                            Err(e) => show_message_dialog(
+                                &ctx3.window,
                                 "Could not save file",
                                 &e.to_string(),
-                            );
+                            ),
                         }
-                        Ok(()) => {
-                            drop(st);
-                            let mut st = ctx2.state.borrow_mut();
-                            st.dirty = false;
-                            st.path = Some(path.clone());
-                            update_title(&ctx2.window, Some(&path), false);
-                            btn.set_sensitive(false);
-                        }
-                    }
+                    });
                 }
             });
         }
@@ -540,43 +572,52 @@ fn load_csv_into_state(
     encoding_hint: Option<(&'static encoding_rs::Encoding, bool)>,
     ctx: &UiContext,
 ) {
-    match csv_handler::read_csv(&path, sep, encoding_hint) {
-        Ok(csv) => {
-            let had_jagged = csv.had_jagged_rows;
-            {
-                let mut st = ctx.state.borrow_mut();
-                st.path = Some(path.clone());
-                st.separator = sep;
-                st.encoding = csv.encoding;
-                st.encoding_bom = csv.encoding_bom;
-                st.headers = csv.headers;
-                st.rows = csv.rows;
-                st.dirty = false;
-                st.clear_search();
+    let ctx = ctx.clone();
+    glib::spawn_future_local(async move {
+        let result = gio::spawn_blocking(move || {
+            csv_handler::read_csv(&path, sep, encoding_hint).map(|csv| (path, csv))
+        })
+        .await
+        .expect("blocking task panicked");
+
+        match result {
+            Ok((path, csv)) => {
+                let had_jagged = csv.had_jagged_rows;
+                {
+                    let mut st = ctx.state.borrow_mut();
+                    st.path = Some(path.clone());
+                    st.separator = sep;
+                    st.encoding = csv.encoding;
+                    st.encoding_bom = csv.encoding_bom;
+                    st.headers = csv.headers;
+                    st.rows = csv.rows;
+                    st.dirty = false;
+                    st.clear_search();
+                }
+                // Sync encoding dropdown to the (possibly auto-detected) encoding.
+                {
+                    let st = ctx.state.borrow();
+                    let idx = Sidebar::index_of_encoding(st.encoding, st.encoding_bom);
+                    ctx.enc_reverting.set(true);
+                    ctx.sidebar.enc_row.set_selected(idx);
+                    ctx.enc_reverting.set(false);
+                }
+                ctx.table.load(Rc::clone(&ctx.state));
+                update_title(&ctx.window, Some(&path), false);
+                ctx.toolbar.save_btn.set_sensitive(false);
+                if had_jagged {
+                    show_message_dialog(
+                        &ctx.window,
+                        "Inconsistent Column Count",
+                        "Some rows have fewer columns than the header row.\n\
+                         Missing fields are displayed as empty cells and will be \
+                         padded when the file is saved.",
+                    );
+                }
             }
-            // Sync encoding dropdown to the (possibly auto-detected) encoding.
-            {
-                let st = ctx.state.borrow();
-                let idx = Sidebar::index_of_encoding(st.encoding, st.encoding_bom);
-                ctx.enc_reverting.set(true);
-                ctx.sidebar.enc_row.set_selected(idx);
-                ctx.enc_reverting.set(false);
-            }
-            ctx.table.load(Rc::clone(&ctx.state));
-            update_title(&ctx.window, Some(&path), false);
-            ctx.toolbar.save_btn.set_sensitive(false);
-            if had_jagged {
-                show_message_dialog(
-                    &ctx.window,
-                    "Inconsistent Column Count",
-                    "Some rows have fewer columns than the header row.\n\
-                     Missing fields are displayed as empty cells and will be \
-                     padded when the file is saved.",
-                );
-            }
+            Err(e) => show_message_dialog(&ctx.window, "Could not open file", &e.to_string()),
         }
-        Err(e) => show_message_dialog(&ctx.window, "Could not open file", &e.to_string()),
-    }
+    });
 }
 
 /// Open the search bar and focus the entry.  Used by both the toggle button
