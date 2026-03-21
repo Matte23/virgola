@@ -1,23 +1,25 @@
 pub mod dialogs;
+pub mod sidebar;
 pub mod table;
 pub mod toolbar;
 
 use crate::csv_handler;
 use crate::state::{Direction, State};
 use adw::{
-    AboutDialog, AlertDialog, ApplicationWindow, ResponseAppearance, ToolbarView, gio, glib,
-    prelude::*,
+    AboutDialog, AlertDialog, ApplicationWindow, OverlaySplitView, ResponseAppearance, ToolbarView,
+    gio, glib, prelude::*,
 };
 use dialogs::show_custom_separator_dialog;
 use gtk::{
     Align, Box as GtkBox, Button, CssProvider, EventControllerKey, FileDialog, License,
-    Orientation, SearchBar, SearchEntry,
+    Orientation, PackType, SearchBar, SearchEntry,
 };
+use sidebar::{CUSTOM_SEP_IDX, Sidebar};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use table::Table;
-use toolbar::{CUSTOM_SEP_IDX, Toolbar};
+use toolbar::Toolbar;
 
 // ── Shared UI context ─────────────────────────────────────────────────────────
 
@@ -30,6 +32,7 @@ struct UiContext {
     state: Rc<RefCell<State>>,
     table: Rc<Table>,
     toolbar: Rc<Toolbar>,
+    sidebar: Rc<Sidebar>,
     window: ApplicationWindow,
     sep_prev_idx: Rc<Cell<u32>>,
     sep_reverting: Rc<Cell<bool>>,
@@ -42,6 +45,7 @@ impl Clone for UiContext {
             state: Rc::clone(&self.state),
             table: Rc::clone(&self.table),
             toolbar: Rc::clone(&self.toolbar),
+            sidebar: Rc::clone(&self.sidebar),
             window: self.window.clone(),
             sep_prev_idx: Rc::clone(&self.sep_prev_idx),
             sep_reverting: Rc::clone(&self.sep_reverting),
@@ -53,7 +57,7 @@ impl Clone for UiContext {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_files: usize) {
-    // ── CSS for search highlighting ───────────────────────────────────────────
+    // ── CSS ───────────────────────────────────────────────────────────────────
     let css = CssProvider::new();
     css.load_from_resource("/com/github/virgola/style.css");
     gtk::style_context_add_provider_for_display(
@@ -71,6 +75,7 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
 
     let toolbar = Rc::new(Toolbar::new());
     let table = Rc::new(Table::new());
+    let sidebar = Rc::new(Sidebar::new());
 
     // Save starts insensitive — no file is open yet.
     toolbar.save_btn.set_sensitive(false);
@@ -95,18 +100,28 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
     search_bar.set_child(Some(&search_box));
     search_bar.connect_entry(&search_entry);
 
-    let toolbar_view = ToolbarView::new();
-    toolbar_view.add_top_bar(&toolbar.header_bar);
+    // ── Layout: OverlaySplitView with right sidebar ───────────────────────────
     let vbox = GtkBox::new(Orientation::Vertical, 0);
     vbox.append(&search_bar);
     vbox.append(&table.scrolled);
-    toolbar_view.set_content(Some(&vbox));
+
+    let split_view = OverlaySplitView::new();
+    split_view.set_sidebar_position(PackType::End);
+    split_view.set_show_sidebar(false);
+    split_view.set_min_sidebar_width(220.0);
+    split_view.set_content(Some(&vbox));
+    split_view.set_sidebar(Some(&sidebar.container));
+
+    let toolbar_view = ToolbarView::new();
+    toolbar_view.add_top_bar(&toolbar.header_bar);
+    toolbar_view.set_content(Some(&split_view));
     window.set_content(Some(&toolbar_view));
 
     let ctx = UiContext {
         state: Rc::new(RefCell::new(State::new())),
         table,
         toolbar,
+        sidebar,
         window,
         sep_prev_idx: Rc::new(Cell::new(0)),
         sep_reverting: Rc::new(Cell::new(false)),
@@ -121,6 +136,20 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
             update_title(&c.window, st.path.as_deref(), true);
             c.toolbar.save_btn.set_sensitive(true);
         }));
+    }
+
+    // ── Sidebar toggle button ↔ split view ───────────────────────────────────
+    {
+        let sv = split_view.clone();
+        ctx.toolbar.sidebar_btn.connect_toggled(move |btn| {
+            sv.set_show_sidebar(btn.is_active());
+        });
+    }
+    {
+        let btn = ctx.toolbar.sidebar_btn.clone();
+        split_view.connect_show_sidebar_notify(move |sv| {
+            btn.set_active(sv.shows_sidebar());
+        });
     }
 
     setup_open_handler(ctx.clone());
@@ -139,9 +168,9 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
     // error dialog already has a valid parent.
     if let Some(path) = initial_path {
         let sep = csv_handler::detect_separator(&path);
-        if let Some(idx) = Toolbar::index_of_separator(sep) {
+        if let Some(idx) = Sidebar::index_of_separator(sep) {
             ctx.sep_reverting.set(true);
-            ctx.toolbar.sep_dropdown.set_selected(idx);
+            ctx.sidebar.sep_row.set_selected(idx);
             ctx.sep_reverting.set(false);
             ctx.sep_prev_idx.set(idx);
         }
@@ -184,9 +213,9 @@ fn setup_open_handler(ctx: UiContext) {
                         let sep = csv_handler::detect_separator(&path);
                         // Silently update the separator dropdown to match
                         // the detected separator so the UI stays in sync.
-                        if let Some(idx) = Toolbar::index_of_separator(sep) {
+                        if let Some(idx) = Sidebar::index_of_separator(sep) {
                             ctx2.sep_reverting.set(true);
-                            ctx2.toolbar.sep_dropdown.set_selected(idx);
+                            ctx2.sidebar.sep_row.set_selected(idx);
                             ctx2.sep_reverting.set(false);
                             ctx2.sep_prev_idx.set(idx);
                         }
@@ -274,10 +303,9 @@ fn setup_save_handler(ctx: UiContext) {
 }
 
 fn setup_about_handler(ctx: UiContext) {
-    let about_btn = ctx.toolbar.about_btn.clone();
-    let popover = ctx.toolbar.menu_popover.clone();
-    about_btn.connect_clicked(move |_| {
-        popover.popdown();
+    let action = gio::SimpleAction::new("about", None);
+    let window = ctx.window.clone();
+    action.connect_activate(move |_, _| {
         let about = AboutDialog::builder()
             .application_name("Virgola")
             .developer_name("Matte23")
@@ -288,13 +316,13 @@ fn setup_about_handler(ctx: UiContext) {
             .copyright("© 2026 Matteo Schiff")
             .website("https://github.com/Matte23/virgola")
             .build();
-        about.present(Some(&ctx.window));
+        about.present(Some(&window));
     });
+    ctx.window.add_action(&action);
 }
 
 fn setup_separator_handler(ctx: UiContext) {
-    let sep_dropdown = ctx.toolbar.sep_dropdown.clone();
-    let popover = ctx.toolbar.menu_popover.clone();
+    let sep_dropdown = ctx.sidebar.sep_row.clone();
     sep_dropdown.connect_selected_notify({
         let prev_idx = Rc::clone(&ctx.sep_prev_idx);
         let reverting = Rc::clone(&ctx.sep_reverting);
@@ -302,7 +330,7 @@ fn setup_separator_handler(ctx: UiContext) {
             if reverting.get() {
                 return;
             }
-            match ctx.toolbar.current_separator() {
+            match ctx.sidebar.current_separator() {
                 Some(sep) => {
                     prev_idx.set(dd.selected());
                     apply_separator(&ctx, sep);
@@ -313,7 +341,6 @@ fn setup_separator_handler(ctx: UiContext) {
                     let prev = prev_idx.get();
                     let reverting_c = reverting.clone();
                     let prev_idx_c = prev_idx.clone();
-                    let popover_c = popover.clone();
                     show_custom_separator_dialog(&ctx.window, move |maybe_sep| match maybe_sep {
                         Some(sep) => {
                             prev_idx_c.set(CUSTOM_SEP_IDX);
@@ -325,7 +352,6 @@ fn setup_separator_handler(ctx: UiContext) {
                             reverting_c.set(false);
                         }
                     });
-                    popover_c.popdown();
                 }
             }
         }
@@ -333,12 +359,12 @@ fn setup_separator_handler(ctx: UiContext) {
 }
 
 fn setup_encoding_handler(ctx: UiContext) {
-    let enc_dropdown = ctx.toolbar.enc_dropdown.clone();
+    let enc_dropdown = ctx.sidebar.enc_row.clone();
     enc_dropdown.connect_selected_notify(move |_| {
         if ctx.enc_reverting.get() {
             return;
         }
-        let (enc, bom) = ctx.toolbar.current_encoding();
+        let (enc, bom) = ctx.sidebar.current_encoding();
         apply_encoding(&ctx, enc, bom);
     });
 }
@@ -531,9 +557,9 @@ fn load_csv_into_state(
             // Sync encoding dropdown to the (possibly auto-detected) encoding.
             {
                 let st = ctx.state.borrow();
-                let idx = Toolbar::index_of_encoding(st.encoding, st.encoding_bom);
+                let idx = Sidebar::index_of_encoding(st.encoding, st.encoding_bom);
                 ctx.enc_reverting.set(true);
-                ctx.toolbar.enc_dropdown.set_selected(idx);
+                ctx.sidebar.enc_row.set_selected(idx);
                 ctx.enc_reverting.set(false);
             }
             ctx.table.load(Rc::clone(&ctx.state));
