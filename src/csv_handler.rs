@@ -37,61 +37,111 @@ impl From<std::io::Error> for CsvError {
 
 // ── Read result ───────────────────────────────────────────────────────────────
 
-/// Returned by `read_csv`.  Carries the parsed data plus a flag that tells
-/// callers whether the file had rows with a different column count than the
-/// header — so the UI can warn the user without refusing to load the file.
+/// Returned by `read_csv`.  Carries the parsed data plus diagnostic flags
+/// so the UI can warn the user without refusing to load the file.
 pub struct CsvReadResult {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
     /// `true` if at least one data row had a different number of fields than
     /// the header row.
     pub had_jagged_rows: bool,
+    /// The encoding that was used to decode the file (auto-detected or
+    /// explicitly requested via `encoding_hint`).
+    pub encoding: &'static encoding_rs::Encoding,
+    /// `true` if the file began with a byte-order mark for this encoding.
+    pub encoding_bom: bool,
 }
 
 // ── Encoding ──────────────────────────────────────────────────────────────────
 
-/// Decode raw file bytes to a UTF-8 `Cow<str>`.
+/// Auto-detect the encoding of `raw` bytes, decode to UTF-8, and report
+/// the detected encoding and whether a BOM was present.
 ///
-/// Fast path: if the bytes are valid UTF-8 (and begin with an optional
-/// UTF-8 BOM that is stripped), a borrowed slice is returned with no copy.
+/// Fast path: valid UTF-8 (optionally with a UTF-8 BOM that is stripped)
+/// returns a borrowed slice with no allocation.
 ///
-/// Slow path: `chardetng` guesses the encoding, `encoding_rs` decodes it.
-/// Any bytes that cannot be represented are replaced with U+FFFD.
-fn decode_bytes(raw: &[u8]) -> Cow<'_, str> {
-    // Strip UTF-8 BOM (\xEF\xBB\xBF) before the UTF-8 validity check so
-    // the BOM does not end up in the first header cell.
-    let raw = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw);
-
-    if let Ok(s) = std::str::from_utf8(raw) {
-        return Cow::Borrowed(s);
+/// Slow path: `chardetng` guesses the encoding and `encoding_rs` decodes it.
+/// Unmappable bytes are replaced with U+FFFD.
+fn decode_bytes(raw: &[u8]) -> (Cow<'_, str>, &'static encoding_rs::Encoding, bool) {
+    // UTF-8 BOM (\xEF\xBB\xBF) — strip before validity check.
+    if let Some(rest) = raw.strip_prefix(b"\xEF\xBB\xBF") {
+        if let Ok(s) = std::str::from_utf8(rest) {
+            return (Cow::Borrowed(s), encoding_rs::UTF_8, true);
+        }
+        // Has a UTF-8 BOM but invalid UTF-8 after it — fall through to detection.
     }
 
+    // Fast path: valid UTF-8 without BOM.
+    if let Ok(s) = std::str::from_utf8(raw) {
+        return (Cow::Borrowed(s), encoding_rs::UTF_8, false);
+    }
+
+    // Non-UTF-8: detect encoding and decode.
     let mut det = chardetng::EncodingDetector::new();
     det.feed(raw, true);
     let encoding = det.guess(None, true);
 
-    // `encoding_rs::Encoding::decode` strips a leading BOM for encodings that
-    // use one (UTF-16 LE/BE) and replaces unmappable bytes with U+FFFD.
-    let (decoded, _enc, _had_replacements) = encoding.decode(raw);
-    // The returned Cow may still carry a leading U+FEFF for non-BOM encodings;
-    // strip it just in case.
-    match decoded {
-        Cow::Borrowed(s) => Cow::Borrowed(s.strip_prefix('\u{FEFF}').unwrap_or(s)),
-        Cow::Owned(s) => Cow::Owned(
-            if s.starts_with('\u{FEFF}') {
-                s['\u{FEFF}'.len_utf8()..].to_owned()
-            } else {
-                s
-            },
-        ),
+    // `encoding_rs::Encoding::decode` strips UTF-16 LE/BE BOMs automatically.
+    let had_bom = raw.starts_with(b"\xFF\xFE") || raw.starts_with(b"\xFE\xFF");
+    let (decoded, _, _) = encoding.decode(raw);
+
+    // Strip any residual U+FEFF (defensive — encoding_rs should have removed it).
+    let decoded = strip_bom_char(decoded);
+    (decoded, encoding, had_bom)
+}
+
+/// Decode `raw` using an *explicitly specified* encoding, stripping the BOM
+/// when `bom` is true.  Used when the user overrides the auto-detected encoding.
+fn decode_as<'a>(raw: &'a [u8], enc: &'static encoding_rs::Encoding, bom: bool) -> Cow<'a, str> {
+    if enc == encoding_rs::UTF_8 {
+        let payload = if bom {
+            raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw)
+        } else {
+            raw
+        };
+        if let Ok(s) = std::str::from_utf8(payload) {
+            return Cow::Borrowed(s);
+        }
+        // User said UTF-8 but the bytes aren't — decode lossily rather than fail.
+        return Cow::Owned(String::from_utf8_lossy(payload).into_owned());
+    }
+
+    // Non-UTF-8: encoding_rs strips UTF-16 BOMs automatically.
+    let (decoded, _, _) = enc.decode(raw);
+    strip_bom_char(decoded)
+}
+
+/// Remove a leading U+FEFF from a `Cow<str>` in place.
+fn strip_bom_char(s: Cow<'_, str>) -> Cow<'_, str> {
+    const BOM: char = '\u{FEFF}';
+    match s {
+        Cow::Borrowed(s) => Cow::Borrowed(s.strip_prefix(BOM).unwrap_or(s)),
+        Cow::Owned(s) => Cow::Owned(if s.starts_with(BOM) {
+            s[BOM.len_utf8()..].to_owned()
+        } else {
+            s
+        }),
     }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-pub fn read_csv(path: &Path, sep: u8) -> Result<CsvReadResult, CsvError> {
+/// Read a CSV file.
+///
+/// Pass `encoding_hint = None` to auto-detect the encoding (the usual case
+/// when first opening a file).  Pass `Some((enc, bom))` to force a specific
+/// encoding — used when the user changes the encoding dropdown.
+pub fn read_csv(
+    path: &Path,
+    sep: u8,
+    encoding_hint: Option<(&'static encoding_rs::Encoding, bool)>,
+) -> Result<CsvReadResult, CsvError> {
     let raw = fs::read(path)?;
-    let text = decode_bytes(&raw);
+
+    let (text, encoding, encoding_bom): (Cow<str>, _, _) = match encoding_hint {
+        Some((enc, bom)) => (decode_as(&raw, enc, bom), enc, bom),
+        None => decode_bytes(&raw),
+    };
 
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(sep)
@@ -115,6 +165,8 @@ pub fn read_csv(path: &Path, sep: u8) -> Result<CsvReadResult, CsvError> {
         headers,
         rows,
         had_jagged_rows,
+        encoding,
+        encoding_bom,
     })
 }
 
@@ -176,27 +228,35 @@ pub fn detect_separator(path: &Path) -> u8 {
     best_sep
 }
 
+/// Write a CSV file in the specified encoding, atomically.
+///
+/// The CSV content is first written into an in-memory UTF-8 buffer, then
+/// re-encoded to the target encoding.  For plain UTF-8 this is a copy; for
+/// other encodings `encoding_rs` performs the conversion.  A BOM is prepended
+/// when `encoding_bom` is true.
+///
+/// Writes to a `.csv.tmp` sidecar first, then renames atomically so a crash
+/// mid-write never leaves a truncated file.
 pub fn write_csv(
     path: &Path,
     sep: u8,
     headers: &[String],
     rows: &[Vec<String>],
+    encoding: &'static encoding_rs::Encoding,
+    encoding_bom: bool,
 ) -> Result<(), CsvError> {
     let ncols = headers.len();
 
-    // Write to a temp file first, then rename atomically so a crash or error
-    // mid-write never leaves a truncated/corrupt file at the target path.
-    let tmp_path = path.with_extension("csv.tmp");
+    // ── 1. Produce UTF-8 CSV in memory ────────────────────────────────────────
+    let mut utf8_buf: Vec<u8> = Vec::new();
     {
         let mut wtr = csv::WriterBuilder::new()
             .delimiter(sep)
-            .from_path(&tmp_path)?;
+            .from_writer(&mut utf8_buf);
 
         wtr.write_record(headers)?;
         for row in rows {
             // Pad short rows with empty fields to keep the output rectangular.
-            // Rows that are already the right length or longer are written as-is
-            // (extra fields are preserved — the user put them there).
             if row.len() < ncols {
                 let mut padded = row.to_vec();
                 padded.resize(ncols, String::new());
@@ -207,6 +267,44 @@ pub fn write_csv(
         }
         wtr.flush()?;
     }
+
+    // ── 2. Re-encode to target encoding ───────────────────────────────────────
+    let final_bytes = encode_output(&utf8_buf, encoding, encoding_bom);
+
+    // ── 3. Atomic write ───────────────────────────────────────────────────────
+    let tmp_path = path.with_extension("csv.tmp");
+    fs::write(&tmp_path, &final_bytes)?;
     fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Convert a UTF-8 byte slice to the target encoding, prepending a BOM if
+/// requested.
+fn encode_output(utf8: &[u8], encoding: &'static encoding_rs::Encoding, bom: bool) -> Vec<u8> {
+    let bom_bytes: &[u8] = if !bom {
+        b""
+    } else if encoding == encoding_rs::UTF_8 {
+        b"\xEF\xBB\xBF"
+    } else if encoding == encoding_rs::UTF_16LE {
+        b"\xFF\xFE"
+    } else if encoding == encoding_rs::UTF_16BE {
+        b"\xFE\xFF"
+    } else {
+        b""
+    };
+
+    if encoding == encoding_rs::UTF_8 {
+        // Fast path: no re-encoding needed.
+        let mut out = Vec::with_capacity(bom_bytes.len() + utf8.len());
+        out.extend_from_slice(bom_bytes);
+        out.extend_from_slice(utf8);
+        out
+    } else {
+        let text = std::str::from_utf8(utf8).expect("csv crate produces valid UTF-8");
+        let (encoded, _, _) = encoding.encode(text);
+        let mut out = Vec::with_capacity(bom_bytes.len() + encoded.len());
+        out.extend_from_slice(bom_bytes);
+        out.extend_from_slice(&encoded);
+        out
+    }
 }

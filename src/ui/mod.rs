@@ -88,6 +88,9 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
     let sep_prev_idx: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let sep_reverting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
+    // Equivalent guard for the encoding dropdown.
+    let enc_reverting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
     setup_open_handler(
         &toolbar.open_btn,
         Rc::clone(&state),
@@ -96,6 +99,7 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
         &window,
         Rc::clone(&sep_prev_idx),
         Rc::clone(&sep_reverting),
+        Rc::clone(&enc_reverting),
     );
     setup_save_handler(&toolbar.save_btn, Rc::clone(&state), &window);
     setup_about_handler(&toolbar.about_btn, &toolbar.menu_popover, &window);
@@ -107,6 +111,15 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
         &window,
         Rc::clone(&sep_prev_idx),
         Rc::clone(&sep_reverting),
+        Rc::clone(&enc_reverting),
+    );
+    setup_encoding_handler(
+        &toolbar.enc_dropdown,
+        Rc::clone(&state),
+        Rc::clone(&table),
+        Rc::clone(&toolbar),
+        &window,
+        Rc::clone(&enc_reverting),
     );
     setup_search_visibility(
         &toolbar.search_btn,
@@ -132,7 +145,16 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<std::path::PathBuf>
             sep_reverting.set(false);
             sep_prev_idx.set(idx);
         }
-        load_csv_into_state(path, sep, &state, &table, &window, &toolbar.save_btn);
+        load_csv_into_state(
+            path,
+            sep,
+            None,
+            &state,
+            &table,
+            &window,
+            &toolbar,
+            &enc_reverting,
+        );
     }
 
     window.present();
@@ -148,6 +170,7 @@ fn setup_open_handler(
     window: &ApplicationWindow,
     sep_prev_idx: Rc<Cell<u32>>,
     sep_reverting: Rc<Cell<bool>>,
+    enc_reverting: Rc<Cell<bool>>,
 ) {
     let window = window.clone();
     open_btn.connect_clicked(move |_| {
@@ -158,28 +181,41 @@ fn setup_open_handler(
             let window = window.clone();
             let sep_prev_idx = Rc::clone(&sep_prev_idx);
             let sep_reverting = Rc::clone(&sep_reverting);
+            let enc_reverting = Rc::clone(&enc_reverting);
             move || {
                 let state2 = Rc::clone(&state);
                 let table2 = Rc::clone(&table);
+                let toolbar2 = Rc::clone(&toolbar);
                 let window_cb = window.clone();
-                let save_btn_cb = toolbar.save_btn.clone();
                 let sep_prev_idx = Rc::clone(&sep_prev_idx);
                 let sep_reverting = Rc::clone(&sep_reverting);
+                let enc_reverting = Rc::clone(&enc_reverting);
                 let dialog = make_open_dialog();
                 dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result
                         && let Some(path) = file.path()
                     {
                         let sep = csv_handler::detect_separator(&path);
-                        // Silently update the dropdown to match the
+                        // Silently update the separator dropdown to match the
                         // detected separator so the UI stays in sync.
                         if let Some(idx) = Toolbar::index_of_separator(sep) {
                             sep_reverting.set(true);
-                            toolbar.sep_dropdown.set_selected(idx);
+                            toolbar2.sep_dropdown.set_selected(idx);
                             sep_reverting.set(false);
                             sep_prev_idx.set(idx);
                         }
-                        load_csv_into_state(path, sep, &state2, &table2, &window_cb, &save_btn_cb);
+                        // Encoding is auto-detected inside load_csv_into_state
+                        // and the enc_dropdown is synced there.
+                        load_csv_into_state(
+                            path,
+                            sep,
+                            None,
+                            &state2,
+                            &table2,
+                            &window_cb,
+                            &toolbar2,
+                            &enc_reverting,
+                        );
                     }
                 });
             }
@@ -202,7 +238,14 @@ fn setup_save_handler(save_btn: &Button, state: Rc<RefCell<State>>, window: &App
         let btn_c = btn.clone();
         if let Some(path) = path {
             let st = state_c.borrow();
-            match csv_handler::write_csv(&path, st.separator, &st.headers, &st.rows) {
+            match csv_handler::write_csv(
+                &path,
+                st.separator,
+                &st.headers,
+                &st.rows,
+                st.encoding,
+                st.encoding_bom,
+            ) {
                 Err(e) => {
                     drop(st);
                     show_message_dialog(&window_c, "Could not save file", &e.to_string());
@@ -223,7 +266,14 @@ fn setup_save_handler(save_btn: &Button, state: Rc<RefCell<State>>, window: &App
                     && let Some(path) = file.path()
                 {
                     let st = state_c.borrow();
-                    match csv_handler::write_csv(&path, st.separator, &st.headers, &st.rows) {
+                    match csv_handler::write_csv(
+                        &path,
+                        st.separator,
+                        &st.headers,
+                        &st.rows,
+                        st.encoding,
+                        st.encoding_bom,
+                    ) {
                         Err(e) => {
                             drop(st);
                             show_message_dialog(&window_c, "Could not save file", &e.to_string());
@@ -267,6 +317,7 @@ fn setup_separator_handler(
     window: &ApplicationWindow,
     sep_prev_idx: Rc<Cell<u32>>,
     sep_reverting: Rc<Cell<bool>>,
+    enc_reverting: Rc<Cell<bool>>,
 ) {
     let window = window.clone();
     let popover = toolbar.menu_popover.clone();
@@ -280,13 +331,14 @@ fn setup_separator_handler(
             match toolbar.current_separator() {
                 Some(sep) => {
                     prev_idx.set(dd.selected());
-                    apply_separator(&state, &table, &window, &toolbar.save_btn, sep);
+                    apply_separator(&state, &table, &window, &toolbar, &enc_reverting, sep);
                 }
                 None => {
                     let state_c = Rc::clone(&state);
                     let table_c = Rc::clone(&table);
+                    let toolbar_c = Rc::clone(&toolbar);
                     let window_c = window.clone();
-                    let save_btn_c = toolbar.save_btn.clone();
+                    let enc_reverting_c = Rc::clone(&enc_reverting);
                     let dd_c = dd.clone();
                     let prev = prev_idx.get();
                     let reverting_c = reverting.clone();
@@ -295,7 +347,14 @@ fn setup_separator_handler(
                     show_custom_separator_dialog(&window, move |maybe_sep| match maybe_sep {
                         Some(sep) => {
                             prev_idx_c.set(CUSTOM_SEP_IDX);
-                            apply_separator(&state_c, &table_c, &window_c, &save_btn_c, sep);
+                            apply_separator(
+                                &state_c,
+                                &table_c,
+                                &window_c,
+                                &toolbar_c,
+                                &enc_reverting_c,
+                                sep,
+                            );
                         }
                         None => {
                             reverting_c.set(true);
@@ -307,6 +366,24 @@ fn setup_separator_handler(
                 }
             }
         }
+    });
+}
+
+fn setup_encoding_handler(
+    enc_dropdown: &DropDown,
+    state: Rc<RefCell<State>>,
+    table: Rc<Table>,
+    toolbar: Rc<Toolbar>,
+    window: &ApplicationWindow,
+    enc_reverting: Rc<Cell<bool>>,
+) {
+    let window = window.clone();
+    enc_dropdown.connect_selected_notify(move |_| {
+        if enc_reverting.get() {
+            return;
+        }
+        let (enc, bom) = toolbar.current_encoding();
+        apply_encoding(&state, &table, &window, &toolbar, &enc_reverting, enc, bom);
     });
 }
 
@@ -424,7 +501,8 @@ fn apply_separator(
     state: &Rc<RefCell<State>>,
     table: &Rc<Table>,
     window: &ApplicationWindow,
-    save_btn: &Button,
+    toolbar: &Rc<Toolbar>,
+    enc_reverting: &Rc<Cell<bool>>,
     sep: u8,
 ) {
     let (dirty, has_file) = {
@@ -436,13 +514,80 @@ fn apply_separator(
         let state = Rc::clone(state);
         let table = Rc::clone(table);
         let window = window.clone();
-        let save_btn = save_btn.clone();
+        let toolbar = Rc::clone(toolbar);
+        let enc_reverting = Rc::clone(enc_reverting);
         move || {
-            // Always store the chosen separator (also used for future opens).
+            // Store the chosen separator (also used for future opens).
             state.borrow_mut().separator = sep;
-            let path = state.borrow().path.clone();
+            // Keep the current encoding — only the separator changed.
+            let (path, enc, bom) = {
+                let st = state.borrow();
+                (st.path.clone(), st.encoding, st.encoding_bom)
+            };
             if let Some(path) = path {
-                load_csv_into_state(path, sep, &state, &table, &window, &save_btn);
+                load_csv_into_state(
+                    path,
+                    sep,
+                    Some((enc, bom)),
+                    &state,
+                    &table,
+                    &window,
+                    &toolbar,
+                    &enc_reverting,
+                );
+            }
+        }
+    };
+
+    if dirty && has_file {
+        confirm_discard(window, do_apply);
+    } else {
+        do_apply();
+    }
+}
+
+fn apply_encoding(
+    state: &Rc<RefCell<State>>,
+    table: &Rc<Table>,
+    window: &ApplicationWindow,
+    toolbar: &Rc<Toolbar>,
+    enc_reverting: &Rc<Cell<bool>>,
+    enc: &'static encoding_rs::Encoding,
+    bom: bool,
+) {
+    let (dirty, has_file) = {
+        let st = state.borrow();
+        (st.dirty, st.path.is_some())
+    };
+
+    let do_apply = {
+        let state = Rc::clone(state);
+        let table = Rc::clone(table);
+        let window = window.clone();
+        let toolbar = Rc::clone(toolbar);
+        let enc_reverting = Rc::clone(enc_reverting);
+        move || {
+            let (path, sep) = {
+                let st = state.borrow();
+                (st.path.clone(), st.separator)
+            };
+            if let Some(path) = path {
+                // Re-read the file with the explicitly chosen encoding.
+                load_csv_into_state(
+                    path,
+                    sep,
+                    Some((enc, bom)),
+                    &state,
+                    &table,
+                    &window,
+                    &toolbar,
+                    &enc_reverting,
+                );
+            } else {
+                // No file open yet — just store the encoding preference.
+                let mut st = state.borrow_mut();
+                st.encoding = enc;
+                st.encoding_bom = bom;
             }
         }
     };
@@ -458,32 +603,48 @@ fn apply_separator(
 
 /// Load a CSV file into state and refresh the table.
 ///
+/// Pass `encoding_hint = None` to auto-detect the encoding (the usual case
+/// when first opening a file).  Pass `Some((enc, bom))` to force a specific
+/// encoding — used when re-reading after a separator or encoding change.
+///
 /// Shows a warning dialog if the file has rows with inconsistent column counts,
-/// and an error dialog on read failure.  All three call sites (open button,
-/// separator change, CLI arg) use this function.
+/// and an error dialog on read failure.
 fn load_csv_into_state(
     path: PathBuf,
     sep: u8,
+    encoding_hint: Option<(&'static encoding_rs::Encoding, bool)>,
     state: &Rc<RefCell<State>>,
     table: &Rc<Table>,
     window: &ApplicationWindow,
-    save_btn: &Button,
+    toolbar: &Rc<Toolbar>,
+    enc_reverting: &Rc<Cell<bool>>,
 ) {
-    match csv_handler::read_csv(&path, sep) {
+    match csv_handler::read_csv(&path, sep, encoding_hint) {
         Ok(csv) => {
+            let had_jagged = csv.had_jagged_rows;
             {
                 let mut st = state.borrow_mut();
                 st.path = Some(path.clone());
                 st.separator = sep;
+                st.encoding = csv.encoding;
+                st.encoding_bom = csv.encoding_bom;
                 st.headers = csv.headers;
                 st.rows = csv.rows;
                 st.dirty = false;
                 st.clear_search();
             }
+            // Sync encoding dropdown to the (possibly auto-detected) encoding.
+            {
+                let st = state.borrow();
+                let idx = Toolbar::index_of_encoding(st.encoding, st.encoding_bom);
+                enc_reverting.set(true);
+                toolbar.enc_dropdown.set_selected(idx);
+                enc_reverting.set(false);
+            }
             table.load(Rc::clone(state));
             update_title(window, Some(&path), false);
-            save_btn.set_sensitive(false);
-            if csv.had_jagged_rows {
+            toolbar.save_btn.set_sensitive(false);
+            if had_jagged {
                 show_message_dialog(
                     window,
                     "Inconsistent Column Count",
