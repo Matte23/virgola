@@ -64,12 +64,11 @@ pub struct CsvReadResult {
 /// Unmappable bytes are replaced with U+FFFD.
 fn decode_bytes(raw: &[u8]) -> (Cow<'_, str>, &'static encoding_rs::Encoding, bool) {
     // UTF-8 BOM (\xEF\xBB\xBF) — strip before validity check.
-    if let Some(rest) = raw.strip_prefix(b"\xEF\xBB\xBF") {
-        if let Ok(s) = std::str::from_utf8(rest) {
+    if let Some(rest) = raw.strip_prefix(b"\xEF\xBB\xBF")
+        && let Ok(s) = std::str::from_utf8(rest) {
             return (Cow::Borrowed(s), encoding_rs::UTF_8, true);
         }
         // Has a UTF-8 BOM but invalid UTF-8 after it — fall through to detection.
-    }
 
     // Fast path: valid UTF-8 without BOM.
     if let Ok(s) = std::str::from_utf8(raw) {
