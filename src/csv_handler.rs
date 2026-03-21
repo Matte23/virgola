@@ -1,5 +1,7 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -46,18 +48,57 @@ pub struct CsvReadResult {
     pub had_jagged_rows: bool,
 }
 
+// ── Encoding ──────────────────────────────────────────────────────────────────
+
+/// Decode raw file bytes to a UTF-8 `Cow<str>`.
+///
+/// Fast path: if the bytes are valid UTF-8 (and begin with an optional
+/// UTF-8 BOM that is stripped), a borrowed slice is returned with no copy.
+///
+/// Slow path: `chardetng` guesses the encoding, `encoding_rs` decodes it.
+/// Any bytes that cannot be represented are replaced with U+FFFD.
+fn decode_bytes(raw: &[u8]) -> Cow<'_, str> {
+    // Strip UTF-8 BOM (\xEF\xBB\xBF) before the UTF-8 validity check so
+    // the BOM does not end up in the first header cell.
+    let raw = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(raw);
+
+    if let Ok(s) = std::str::from_utf8(raw) {
+        return Cow::Borrowed(s);
+    }
+
+    let mut det = chardetng::EncodingDetector::new();
+    det.feed(raw, true);
+    let encoding = det.guess(None, true);
+
+    // `encoding_rs::Encoding::decode` strips a leading BOM for encodings that
+    // use one (UTF-16 LE/BE) and replaces unmappable bytes with U+FFFD.
+    let (decoded, _enc, _had_replacements) = encoding.decode(raw);
+    // The returned Cow may still carry a leading U+FEFF for non-BOM encodings;
+    // strip it just in case.
+    match decoded {
+        Cow::Borrowed(s) => Cow::Borrowed(s.strip_prefix('\u{FEFF}').unwrap_or(s)),
+        Cow::Owned(s) => Cow::Owned(
+            if s.starts_with('\u{FEFF}') {
+                s['\u{FEFF}'.len_utf8()..].to_owned()
+            } else {
+                s
+            },
+        ),
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn read_csv(path: &Path, sep: u8) -> Result<CsvReadResult, CsvError> {
+    let raw = fs::read(path)?;
+    let text = decode_bytes(&raw);
+
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(sep)
         // flexible(true) so we don't hard-reject jagged files; we report the
         // condition via CsvReadResult::had_jagged_rows instead.
         .flexible(true)
-        // TODO: no encoding is specified; the csv crate assumes UTF-8.
-        //       Non-UTF-8 files (e.g. Windows-1252) will produce garbled text
-        //       or an error.  Add an encoding detection / conversion step.
-        .from_path(path)?;
+        .from_reader(Cursor::new(text.as_bytes()));
 
     let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
     let ncols = headers.len();
