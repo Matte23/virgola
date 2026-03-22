@@ -1,8 +1,9 @@
-use adw::{HeaderBar, gio};
+use adw::{HeaderBar, WindowTitle, gio};
 use gtk::{Button, MenuButton, ToggleButton, prelude::*};
 
 pub struct Toolbar {
     pub header_bar: HeaderBar,
+    pub window_title: WindowTitle,
     pub open_btn: Button,
     pub save_btn: Button,
     pub sidebar_btn: ToggleButton,
@@ -18,6 +19,8 @@ impl Default for Toolbar {
 impl Toolbar {
     pub fn new() -> Self {
         let header_bar = HeaderBar::new();
+        let window_title = WindowTitle::new("Untitled", "");
+        header_bar.set_title_widget(Some(&window_title));
 
         let open_btn = Button::from_icon_name("document-open-symbolic");
         open_btn.set_tooltip_text(Some("Open CSV"));
@@ -48,6 +51,7 @@ impl Toolbar {
 
         Self {
             header_bar,
+            window_title,
             open_btn,
             save_btn,
             sidebar_btn,

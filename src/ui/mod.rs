@@ -133,7 +133,7 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
         let c = ctx.clone();
         ctx.table.set_on_dirty(Rc::new(move || {
             let st = c.state.borrow();
-            update_title(&c.window, st.path.as_deref(), true);
+            update_title(&c.toolbar.window_title, st.path.as_deref(), true);
             c.toolbar.save_btn.set_sensitive(true);
         }));
     }
@@ -270,7 +270,7 @@ fn setup_save_handler(ctx: UiContext) {
                 match result {
                     Ok(path) => {
                         ctx2.state.borrow_mut().dirty = false;
-                        update_title(&ctx2.window, Some(&path), false);
+                        update_title(&ctx2.toolbar.window_title, Some(&path), false);
                         btn.set_sensitive(false);
                     }
                     Err(e) => {
@@ -318,7 +318,7 @@ fn setup_save_handler(ctx: UiContext) {
                                 st.dirty = false;
                                 st.path = Some(path.clone());
                                 drop(st);
-                                update_title(&ctx3.window, Some(&path), false);
+                                update_title(&ctx3.toolbar.window_title, Some(&path), false);
                                 btn.set_sensitive(false);
                             }
                             Err(e) => show_message_dialog(
@@ -603,7 +603,7 @@ fn load_csv_into_state(
                     ctx.enc_reverting.set(false);
                 }
                 ctx.table.load(Rc::clone(&ctx.state));
-                update_title(&ctx.window, Some(&path), false);
+                update_title(&ctx.toolbar.window_title, Some(&path), false);
                 ctx.toolbar.save_btn.set_sensitive(false);
                 if had_jagged {
                     show_message_dialog(
@@ -635,14 +635,19 @@ fn show_message_dialog(window: &ApplicationWindow, title: &str, detail: &str) {
 }
 
 /// Update the window title to reflect the open file and dirty state.
-/// Format: `"filename.csv — Virgola"` or `"filename.csv* — Virgola"`
-fn update_title(window: &ApplicationWindow, path: Option<&Path>, dirty: bool) {
+/// Title = filename (with `*` suffix when dirty), subtitle = parent directory.
+fn update_title(title_widget: &adw::WindowTitle, path: Option<&Path>, dirty: bool) {
     let name = path
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled".to_string());
     let suffix = if dirty { "*" } else { "" };
-    window.set_title(Some(&format!("{name}{suffix} — Virgola")));
+    title_widget.set_title(&format!("{name}{suffix}"));
+    let subtitle = path
+        .and_then(|p| p.parent())
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    title_widget.set_subtitle(&subtitle);
 }
 
 /// Show a modal "Unsaved changes — Discard?" dialog.  Calls `on_confirmed` if
