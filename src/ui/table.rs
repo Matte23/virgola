@@ -102,14 +102,9 @@ impl Table {
         // directly, so no partial-refresh path is needed.
 
         // Remove existing columns
-        let cols: Vec<ColumnViewColumn> = (0..self.column_view.columns().n_items())
-            .filter_map(|i| {
-                self.column_view
-                    .columns()
-                    .item(i)?
-                    .downcast::<ColumnViewColumn>()
-                    .ok()
-            })
+        let cols_model = self.column_view.columns();
+        let cols: Vec<ColumnViewColumn> = (0..cols_model.n_items())
+            .filter_map(|i| cols_model.item(i)?.downcast::<ColumnViewColumn>().ok())
             .collect();
         for col in cols {
             self.column_view.remove_column(&col);
@@ -117,7 +112,7 @@ impl Table {
 
         let st = state.borrow();
         if st.headers.is_empty() {
-            self.column_view.set_model(None::<NoSelection>.as_ref());
+            self.column_view.set_model(gtk::SelectionModel::NONE);
             *self.current_store.borrow_mut() = None;
             return;
         }
@@ -158,7 +153,7 @@ impl Table {
         self.cell_registry.borrow_mut().clear();
         *self.current_store.borrow_mut() = Some(store.clone());
 
-        let selection = NoSelection::new(Some(store.clone()));
+        let selection = NoSelection::new(Some(store));
         self.column_view.set_model(Some(&selection));
 
         // Snapshot the on_dirty callback once per load so it can be cloned
@@ -183,7 +178,7 @@ impl Table {
                 list_item.set_child(Some(&cell_box));
             });
 
-            // Per-column side-table: widget pointer → SignalHandlerId.
+            // Per-column side-table: row position → SignalHandlerId.
             // Shared between bind and unbind closures for the same factory.
             // Eliminates the need for unsafe set_data / steal_data.
             let handler_map: Rc<RefCell<HashMap<usize, glib::SignalHandlerId>>> =
@@ -211,12 +206,12 @@ impl Table {
                         .downcast::<EditableLabel>()
                         .expect("first child should be an EditableLabel");
 
-                    // ── 1. Set cell text BEFORE connecting the changed handler ──
+                    // ── 1. Set cell text, then connect the changed handler ───
                     //
-                    // GTK emits `changed` synchronously during set_text().  By
-                    // connecting the handler only AFTER the text is set, the
-                    // programmatic write is invisible to our handler — no need
-                    // for an in_bind guard flag.
+                    // `EditableLabel` only emits `changed` while in edit mode
+                    // (the user has activated the inline entry).  A programmatic
+                    // `set_text()` in display mode is silent, so the ordering
+                    // here is a no-op guard — kept for clarity.
                     //
                     // `state.rows` is the single source of truth; the ListStore
                     // holds only dummy placeholder items (one per row) for
@@ -261,10 +256,15 @@ impl Table {
                         }
                     });
 
-                    // Store by widget pointer — safe, typed, no GObject internals.
-                    let key = label.as_ptr() as usize;
-                    handler_map.borrow_mut().insert(key, handler_id);
+                    handler_map.borrow_mut().insert(pos, handler_id);
                 }
+            });
+
+            factory.connect_teardown(|_, obj| {
+                let list_item = obj
+                    .downcast_ref::<ListItem>()
+                    .expect("teardown object should be a ListItem");
+                list_item.set_child(gtk::Widget::NONE);
             });
 
             factory.connect_unbind({
@@ -274,22 +274,20 @@ impl Table {
                     let list_item = obj
                         .downcast_ref::<ListItem>()
                         .expect("unbind object should be a ListItem");
-                    let cell_box = list_item
-                        .child()
-                        .expect("list item has no child")
-                        .downcast::<GtkBox>()
-                        .expect("child should be a GtkBox");
-                    let label = cell_box
-                        .first_child()
-                        .expect("cell_box has no child")
-                        .downcast::<EditableLabel>()
-                        .expect("first child should be an EditableLabel");
-
                     let pos = list_item.position() as usize;
+
                     cell_registry.borrow_mut().remove(&(pos, col_idx));
 
-                    let key = label.as_ptr() as usize;
-                    if let Some(id) = handler_map.borrow_mut().remove(&key) {
+                    if let Some(id) = handler_map.borrow_mut().remove(&pos) {
+                        let label = list_item
+                            .child()
+                            .expect("list item has no child")
+                            .downcast::<GtkBox>()
+                            .expect("child should be a GtkBox")
+                            .first_child()
+                            .expect("cell_box has no child")
+                            .downcast::<EditableLabel>()
+                            .expect("first child should be an EditableLabel");
                         label.disconnect(id);
                     }
                 }
