@@ -23,6 +23,7 @@ glib-build-tools = "0.21"
 assets = [
   { source = "target/release/Virgola", dest = "/usr/bin/virgola", mode = "755" },
   { source = "assets/virgola.desktop", dest = "/usr/share/applications/virgola.desktop", mode = "644" },
+  { source = "assets/com.github.virgola.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.github.virgola.svg", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]

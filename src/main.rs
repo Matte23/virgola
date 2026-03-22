@@ -3,7 +3,7 @@ mod state;
 mod ui;
 
 use adw::prelude::*;
-use adw::{Application, gio};
+use adw::{Application, gio, gtk};
 
 const APP_ID: &str = "com.github.virgola";
 
@@ -17,6 +17,11 @@ fn main() {
         // "Open With" from the desktop environment (%f in the .desktop file).
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
+
+    app.connect_startup(|_| {
+        gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("no default display"))
+            .add_resource_path("/com/github/virgola/icons");
+    });
 
     // No file argument — just open the window.
     app.connect_activate(|app| ui::build_ui(app, None, 0));

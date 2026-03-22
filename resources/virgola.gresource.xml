@@ -3,4 +3,7 @@
   <gresource prefix="/com/github/virgola">
     <file>style.css</file>
   </gresource>
+  <gresource prefix="/com/github/virgola/icons/scalable/apps">
+    <file>icons/scalable/apps/com.github.virgola.svg</file>
+  </gresource>
 </gresources>
