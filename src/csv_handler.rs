@@ -156,17 +156,21 @@ pub fn read_csv(
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     if has_header {
-        headers = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+        headers = rdr
+            .headers()?
+            .iter()
+            .map(|s| s.replace('\0', "\u{FFFD}"))
+            .collect();
         for result in rdr.records() {
             let record = result?;
-            rows.push(record.iter().map(|s| s.to_string()).collect());
+            rows.push(record.iter().map(|s| s.replace('\0', "\u{FFFD}")).collect());
         }
     } else {
         // No header row in the file.
         // Read all records first to determine column count from the first row.
         for result in rdr.records() {
             let record = result?;
-            rows.push(record.iter().map(|s| s.to_string()).collect());
+            rows.push(record.iter().map(|s| s.replace('\0', "\u{FFFD}")).collect());
         }
         let ncols = rows.first().map(|r| r.len()).unwrap_or(0);
         headers = (1..=ncols).map(|i| format!("Column {}", i)).collect();
