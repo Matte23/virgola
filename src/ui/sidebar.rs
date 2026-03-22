@@ -1,4 +1,4 @@
-use adw::{ComboRow, PreferencesGroup, prelude::*};
+use adw::{ComboRow, PreferencesGroup, SwitchRow, prelude::*};
 use gtk::{Box as GtkBox, Orientation, PolicyType, ScrolledWindow, StringList};
 
 /// Single source of truth for the separator options.
@@ -32,6 +32,7 @@ pub struct Sidebar {
     /// The top-level widget to hand to `adw::OverlaySplitView`.
     pub container: ScrolledWindow,
     pub sep_row: ComboRow,
+    pub header_row: SwitchRow,
     pub enc_row: ComboRow,
 }
 
@@ -53,6 +54,11 @@ impl Sidebar {
         sep_row.set_model(Some(&sep_model));
         sep_row.set_selected(0);
         group.add(&sep_row);
+
+        let header_row = SwitchRow::new();
+        header_row.set_title("Has header");
+        header_row.set_active(true);
+        group.add(&header_row);
 
         let enc_model = StringList::new(&ENCODINGS.iter().map(|&(l, _, _)| l).collect::<Vec<_>>());
         let enc_row = ComboRow::new();
@@ -78,6 +84,7 @@ impl Sidebar {
         Self {
             container,
             sep_row,
+            header_row,
             enc_row,
         }
     }

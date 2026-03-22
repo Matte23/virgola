@@ -41,6 +41,7 @@ impl SearchState {
 pub struct State {
     pub path: Option<PathBuf>,
     pub separator: u8,
+    pub has_header: bool,
     pub encoding: &'static encoding_rs::Encoding,
     pub encoding_bom: bool,
     pub headers: Vec<String>,
@@ -54,6 +55,7 @@ impl Default for State {
         Self {
             path: None,
             separator: b',',
+            has_header: true,
             encoding: encoding_rs::UTF_8,
             encoding_bom: false,
             headers: Vec::new(),

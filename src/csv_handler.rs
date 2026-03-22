@@ -134,6 +134,7 @@ fn strip_bom_char(s: Cow<'_, str>) -> Cow<'_, str> {
 pub fn read_csv(
     path: &Path,
     sep: u8,
+    has_header: bool,
     encoding_hint: Option<(&'static encoding_rs::Encoding, bool)>,
 ) -> Result<CsvReadResult, CsvError> {
     let raw = fs::read(path)?;
@@ -145,20 +146,33 @@ pub fn read_csv(
 
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(sep)
+        .has_headers(has_header)
         // flexible(true) so we don't hard-reject jagged files; we report the
         // condition via CsvReadResult::had_jagged_rows instead.
         .flexible(true)
         .from_reader(Cursor::new(text.as_bytes()));
 
-    let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
-    let ncols = headers.len();
-
+    let headers: Vec<String>;
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for result in rdr.records() {
-        let record = result?;
-        rows.push(record.iter().map(|s| s.to_string()).collect());
+
+    if has_header {
+        headers = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+        for result in rdr.records() {
+            let record = result?;
+            rows.push(record.iter().map(|s| s.to_string()).collect());
+        }
+    } else {
+        // No header row in the file.
+        // Read all records first to determine column count from the first row.
+        for result in rdr.records() {
+            let record = result?;
+            rows.push(record.iter().map(|s| s.to_string()).collect());
+        }
+        let ncols = rows.first().map(|r| r.len()).unwrap_or(0);
+        headers = (1..=ncols).map(|i| format!("Column {}", i)).collect();
     }
 
+    let ncols = headers.len();
     let had_jagged_rows = rows.iter().any(|r| r.len() != ncols);
 
     Ok(CsvReadResult {
@@ -228,6 +242,159 @@ pub fn detect_separator(path: &Path) -> u8 {
     best_sep
 }
 
+// ── Header Detection ──────────────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+enum DataType {
+    Empty,
+    Integer,
+    Float,
+    Boolean,
+    String,
+}
+
+/// Infer the data type of a string cell.
+fn infer_type(s: &str) -> DataType {
+    let t = s.trim();
+    if t.is_empty() {
+        return DataType::Empty;
+    }
+    if t.parse::<i64>().is_ok() {
+        return DataType::Integer;
+    }
+    if t.parse::<f64>().is_ok() {
+        return DataType::Float;
+    }
+    if t.eq_ignore_ascii_case("true")
+        || t.eq_ignore_ascii_case("false")
+        || t.eq_ignore_ascii_case("yes")
+        || t.eq_ignore_ascii_case("no")
+    {
+        return DataType::Boolean;
+    }
+    DataType::String
+}
+
+/// Detect if the file likely has a header row using a weighted voting system.
+///
+/// Reads the first few rows and compares the types of the first row (candidate header)
+/// against the subsequent rows (data body).
+///
+/// Heuristics:
+/// 1. Duplicate columns in the first row -> likely NOT a header.
+/// 2. Row 0 is String, Data is Number/Bool -> Strong Vote FOR Header.
+/// 3. Row 0 is Number, Data is String -> Strong Vote AGAINST Header.
+/// 4. Row 0 is String, Data is String -> Weak Vote (length check).
+///
+/// Returns `true` by default if ambiguous or if the file is too short.
+pub fn detect_header(path: &Path, sep: u8) -> bool {
+    const SAMPLE_BYTES: usize = 8192;
+    // Read a small sample to avoid parsing huge files.
+    let content = match fs::read(path) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let sample = &content[..content.len().min(SAMPLE_BYTES)];
+    // Fallback to lossy UTF-8 decoding; for header detection this is usually fine.
+    let (text, _, _) = decode_bytes(sample);
+
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(sep)
+        .has_headers(false) // Read everything as data records
+        .flexible(true)
+        .from_reader(Cursor::new(text.as_bytes()));
+
+    // Collect first few rows (e.g. up to 10 + 1 header)
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for record in rdr.records().take(11).flatten() {
+        rows.push(record.iter().map(|s| s.to_string()).collect());
+    }
+
+    if rows.len() < 2 {
+        return true; // Not enough data to decide, assume standard CSV.
+    }
+
+    let header_row = &rows[0];
+    let body_rows = &rows[1..];
+    let ncols = header_row.len();
+
+    // 1. Immediate Disqualification: Duplicates in header row
+    // Headers are almost always unique keys.
+    let mut seen = std::collections::HashSet::new();
+    for col in header_row {
+        if !seen.insert(col) {
+            return false;
+        }
+    }
+
+    let mut score = 0;
+
+    for i in 0..ncols {
+        let h_val = &header_row[i];
+        let h_type = infer_type(h_val);
+
+        // Determine the "dominant" type of this column in the body
+        // We use a simple majority vote among non-empty cells.
+        let mut type_counts = std::collections::HashMap::new();
+        let mut non_empty_count = 0;
+        let mut avg_len = 0;
+
+        for row in body_rows {
+            if let Some(val) = row.get(i) {
+                let d_type = infer_type(val);
+                if d_type != DataType::Empty {
+                    *type_counts.entry(d_type).or_insert(0) += 1;
+                    non_empty_count += 1;
+                    avg_len += val.len();
+                }
+            }
+        }
+
+        if non_empty_count == 0 {
+            continue; // Skip empty columns
+        }
+
+        let avg_body_len = avg_len as f64 / non_empty_count as f64;
+
+        // Find the most frequent type
+        let (dom_type, _) = type_counts
+            .iter()
+            .max_by_key(|&(_, count)| count)
+            .map(|(&t, &c)| (t, c))
+            .unwrap_or((DataType::String, 0));
+
+        // ── Heuristics ──
+
+        // Strong Signal: Header is String, Body is "Strict" (Int/Float/Bool)
+        if h_type == DataType::String
+            && matches!(
+                dom_type,
+                DataType::Integer | DataType::Float | DataType::Boolean
+            )
+        {
+            score += 5;
+        }
+        // Negative Signal: Header is Number, Body is String
+        // (e.g. a year or ID as the first row of data, followed by names)
+        else if matches!(h_type, DataType::Integer | DataType::Float)
+            && dom_type == DataType::String
+        {
+            score -= 5;
+        }
+        // Weak Signal: Both are strings. Check length.
+        // Headers ("Name") are often shorter than data ("The Quick Brown Fox...").
+        else if h_type == DataType::String
+            && dom_type == DataType::String
+            && (h_val.len() as f64) < avg_body_len * 0.8
+        {
+            score += 1;
+        }
+    }
+
+    // Default to true (has header) unless strong evidence against it.
+    score >= 0
+}
+
 /// Write a CSV file in the specified encoding, atomically.
 ///
 /// The CSV content is first written into an in-memory UTF-8 buffer, then
@@ -240,6 +407,7 @@ pub fn detect_separator(path: &Path) -> u8 {
 pub fn write_csv(
     path: &Path,
     sep: u8,
+    has_header: bool,
     headers: &[String],
     rows: &[Vec<String>],
     encoding: &'static encoding_rs::Encoding,
@@ -254,7 +422,9 @@ pub fn write_csv(
             .delimiter(sep)
             .from_writer(&mut utf8_buf);
 
-        wtr.write_record(headers)?;
+        if has_header {
+            wtr.write_record(headers)?;
+        }
         for row in rows {
             // Pad short rows with empty fields to keep the output rectangular.
             if row.len() < ncols {

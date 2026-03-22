@@ -36,6 +36,7 @@ struct UiContext {
     window: ApplicationWindow,
     sep_prev_idx: Rc<Cell<u32>>,
     sep_reverting: Rc<Cell<bool>>,
+    header_reverting: Rc<Cell<bool>>,
     enc_reverting: Rc<Cell<bool>>,
 }
 
@@ -49,6 +50,7 @@ impl Clone for UiContext {
             window: self.window.clone(),
             sep_prev_idx: Rc::clone(&self.sep_prev_idx),
             sep_reverting: Rc::clone(&self.sep_reverting),
+            header_reverting: Rc::clone(&self.header_reverting),
             enc_reverting: Rc::clone(&self.enc_reverting),
         }
     }
@@ -125,6 +127,7 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
         window,
         sep_prev_idx: Rc::new(Cell::new(0)),
         sep_reverting: Rc::new(Cell::new(false)),
+        header_reverting: Rc::new(Cell::new(false)),
         enc_reverting: Rc::new(Cell::new(false)),
     };
 
@@ -156,6 +159,7 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
     setup_save_handler(ctx.clone());
     setup_about_handler(ctx.clone());
     setup_separator_handler(ctx.clone());
+    setup_header_handler(ctx.clone());
     setup_encoding_handler(ctx.clone());
     setup_search_visibility(ctx.clone(), &search_bar, &search_entry);
     setup_search_entry(&search_entry, ctx.clone());
@@ -174,7 +178,8 @@ pub fn build_ui(app: &adw::Application, initial_path: Option<PathBuf>, extra_fil
             ctx.sep_reverting.set(false);
             ctx.sep_prev_idx.set(idx);
         }
-        load_csv_into_state(path, sep, None, &ctx);
+        let has_header = csv_handler::detect_header(&path, sep);
+        load_csv_into_state(path, sep, has_header, None, &ctx);
     }
 
     ctx.window.present();
@@ -228,7 +233,8 @@ fn setup_open_handler(ctx: UiContext) {
                             }
                             // Encoding is auto-detected inside load_csv_into_state
                             // and the enc_dropdown is synced there.
-                            load_csv_into_state(path, sep, None, &ctx2);
+                            let has_header = csv_handler::detect_header(&path, sep);
+                            load_csv_into_state(path, sep, has_header, None, &ctx2);
                         });
                     }
                 });
@@ -249,10 +255,11 @@ fn setup_save_handler(ctx: UiContext) {
         let path = ctx.state.borrow().path.clone();
         let btn = btn.clone();
         if let Some(path) = path {
-            let (sep, headers, rows, encoding, encoding_bom) = {
+            let (sep, has_header, headers, rows, encoding, encoding_bom) = {
                 let st = ctx.state.borrow();
                 (
                     st.separator,
+                    st.has_header,
                     st.headers.clone(),
                     st.rows.clone(),
                     st.encoding,
@@ -262,8 +269,16 @@ fn setup_save_handler(ctx: UiContext) {
             let ctx2 = ctx.clone();
             glib::spawn_future_local(async move {
                 let result = gio::spawn_blocking(move || {
-                    csv_handler::write_csv(&path, sep, &headers, &rows, encoding, encoding_bom)
-                        .map(|()| path)
+                    csv_handler::write_csv(
+                        &path,
+                        sep,
+                        has_header,
+                        &headers,
+                        &rows,
+                        encoding,
+                        encoding_bom,
+                    )
+                    .map(|()| path)
                 })
                 .await
                 .expect("blocking task panicked");
@@ -287,10 +302,11 @@ fn setup_save_handler(ctx: UiContext) {
                 if let Ok(file) = result
                     && let Some(path) = file.path()
                 {
-                    let (sep, headers, rows, encoding, encoding_bom) = {
+                    let (sep, has_header, headers, rows, encoding, encoding_bom) = {
                         let st = ctx2.state.borrow();
                         (
                             st.separator,
+                            st.has_header,
                             st.headers.clone(),
                             st.rows.clone(),
                             st.encoding,
@@ -303,6 +319,7 @@ fn setup_save_handler(ctx: UiContext) {
                             csv_handler::write_csv(
                                 &path,
                                 sep,
+                                has_header,
                                 &headers,
                                 &rows,
                                 encoding,
@@ -388,6 +405,43 @@ fn setup_separator_handler(ctx: UiContext) {
             }
         }
     });
+}
+
+fn setup_header_handler(ctx: UiContext) {
+    let header_switch = ctx.sidebar.header_row.clone();
+    header_switch.connect_active_notify(move |switch| {
+        if ctx.header_reverting.get() {
+            return;
+        }
+        apply_header(&ctx, switch.is_active());
+    });
+}
+
+fn apply_header(ctx: &UiContext, has_header: bool) {
+    let (dirty, has_file) = {
+        let st = ctx.state.borrow();
+        (st.dirty, st.path.is_some())
+    };
+
+    let do_apply = {
+        let ctx = ctx.clone();
+        move || {
+            let (path, sep, enc, bom) = {
+                let mut st = ctx.state.borrow_mut();
+                st.has_header = has_header;
+                (st.path.clone(), st.separator, st.encoding, st.encoding_bom)
+            };
+            if let Some(path) = path {
+                load_csv_into_state(path, sep, has_header, Some((enc, bom)), &ctx);
+            }
+        }
+    };
+
+    if dirty && has_file {
+        confirm_discard(&ctx.window, do_apply);
+    } else {
+        do_apply();
+    }
 }
 
 fn setup_encoding_handler(ctx: UiContext) {
@@ -506,13 +560,13 @@ fn apply_separator(ctx: &UiContext, sep: u8) {
         move || {
             // Store the chosen separator (also used for future opens).
             ctx.state.borrow_mut().separator = sep;
-            // Keep the current encoding — only the separator changed.
-            let (path, enc, bom) = {
+            // Keep the current encoding and header setting.
+            let (path, has_header, enc, bom) = {
                 let st = ctx.state.borrow();
-                (st.path.clone(), st.encoding, st.encoding_bom)
+                (st.path.clone(), st.has_header, st.encoding, st.encoding_bom)
             };
             if let Some(path) = path {
-                load_csv_into_state(path, sep, Some((enc, bom)), &ctx);
+                load_csv_into_state(path, sep, has_header, Some((enc, bom)), &ctx);
             }
         }
     };
@@ -533,13 +587,13 @@ fn apply_encoding(ctx: &UiContext, enc: &'static encoding_rs::Encoding, bom: boo
     let do_apply = {
         let ctx = ctx.clone();
         move || {
-            let (path, sep) = {
+            let (path, sep, has_header) = {
                 let st = ctx.state.borrow();
-                (st.path.clone(), st.separator)
+                (st.path.clone(), st.separator, st.has_header)
             };
             if let Some(path) = path {
                 // Re-read the file with the explicitly chosen encoding.
-                load_csv_into_state(path, sep, Some((enc, bom)), &ctx);
+                load_csv_into_state(path, sep, has_header, Some((enc, bom)), &ctx);
             } else {
                 // No file open yet — just store the encoding preference.
                 let mut st = ctx.state.borrow_mut();
@@ -569,13 +623,14 @@ fn apply_encoding(ctx: &UiContext, enc: &'static encoding_rs::Encoding, bom: boo
 fn load_csv_into_state(
     path: PathBuf,
     sep: u8,
+    has_header: bool,
     encoding_hint: Option<(&'static encoding_rs::Encoding, bool)>,
     ctx: &UiContext,
 ) {
     let ctx = ctx.clone();
     glib::spawn_future_local(async move {
         let result = gio::spawn_blocking(move || {
-            csv_handler::read_csv(&path, sep, encoding_hint).map(|csv| (path, csv))
+            csv_handler::read_csv(&path, sep, has_header, encoding_hint).map(|csv| (path, csv))
         })
         .await
         .expect("blocking task panicked");
@@ -587,6 +642,7 @@ fn load_csv_into_state(
                     let mut st = ctx.state.borrow_mut();
                     st.path = Some(path.clone());
                     st.separator = sep;
+                    st.has_header = has_header;
                     st.encoding = csv.encoding;
                     st.encoding_bom = csv.encoding_bom;
                     st.headers = csv.headers;
@@ -594,9 +650,23 @@ fn load_csv_into_state(
                     st.dirty = false;
                     st.clear_search();
                 }
-                // Sync encoding dropdown to the (possibly auto-detected) encoding.
+                // Sync UI controls to state.
                 {
                     let st = ctx.state.borrow();
+
+                    // Separator
+                    if let Some(idx) = Sidebar::index_of_separator(st.separator) {
+                        ctx.sep_reverting.set(true);
+                        ctx.sidebar.sep_row.set_selected(idx);
+                        ctx.sep_reverting.set(false);
+                    }
+
+                    // Has header
+                    ctx.header_reverting.set(true);
+                    ctx.sidebar.header_row.set_active(st.has_header);
+                    ctx.header_reverting.set(false);
+
+                    // Encoding
                     let idx = Sidebar::index_of_encoding(st.encoding, st.encoding_bom);
                     ctx.enc_reverting.set(true);
                     ctx.sidebar.enc_row.set_selected(idx);
